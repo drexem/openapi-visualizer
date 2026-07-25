@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OpenAPI Visualizer</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script defer src="https://unpkg.com/cytoscape@3.29.2/dist/cytoscape.min.js"></script>
+    <script defer src="https://unpkg.com/lucide@0.468.0/dist/umd/lucide.min.js"></script>
+    <script defer src="/app.js"></script>
+</head>
+<body>
+    <main class="app-shell">
+        <aside class="sidebar">
+            <section class="brand-row">
+                <div>
+                    <h1>OpenAPI Visualizer</h1>
+                    <p id="specMeta">No spec loaded</p>
+                </div>
+            </section>
+
+            <section class="import-panel">
+                <label class="file-input">
+                    <i data-lucide="file-json"></i>
+                    <span id="fileLabel">Load JSON spec</span>
+                    <input id="fileInput" type="file" accept=".json,application/json">
+                </label>
+            </section>
+
+            <section class="search-panel">
+                <div class="search-box">
+                    <i data-lucide="search"></i>
+                    <input id="endpointSearch" type="search" placeholder="Search endpoints" autocomplete="off">
+                </div>
+                <div class="method-row" id="methodFilters">
+                    <button class="method-filter active" data-method="">All</button>
+                    <button class="method-filter get" data-method="GET">GET</button>
+                    <button class="method-filter post" data-method="POST">POST</button>
+                    <button class="method-filter put" data-method="PUT">PUT</button>
+                    <button class="method-filter patch" data-method="PATCH">PATCH</button>
+                    <button class="method-filter delete" data-method="DELETE">DEL</button>
+                </div>
+            </section>
+
+            <section class="favorite-section collapsible-section" data-section="favorites">
+                <button class="section-title section-toggle" type="button" data-toggle-section="favorites" aria-expanded="true">
+                    <span>Favorites</span>
+                    <span class="section-meta">
+                        <span id="favoriteCount">0</span>
+                        <i data-lucide="chevron-down"></i>
+                    </span>
+                </button>
+                <div id="favoriteList" class="endpoint-list section-body"></div>
+            </section>
+
+            <section class="endpoint-section collapsible-section" data-section="endpoints">
+                <button class="section-title section-toggle" type="button" data-toggle-section="endpoints" aria-expanded="true">
+                    <span>Endpoints</span>
+                    <span class="section-meta">
+                        <span id="endpointCount">0</span>
+                        <i data-lucide="chevron-down"></i>
+                    </span>
+                </button>
+                <div id="endpointList" class="endpoint-list section-body"></div>
+            </section>
+
+            <section class="selected-section collapsible-section" data-section="selected">
+                <div class="section-title">
+                    <button class="section-toggle selected-toggle" type="button" data-toggle-section="selected" aria-expanded="true">
+                        <span>Selected</span>
+                        <span class="section-meta">
+                            <span id="selectedCount">0</span>
+                            <i data-lucide="chevron-down"></i>
+                        </span>
+                    </button>
+                    <button id="clearSelection" class="icon-button" title="Clear selection" aria-label="Clear selection">
+                        <i data-lucide="x"></i>
+                    </button>
+                </div>
+                <div id="selectedList" class="selected-list section-body"></div>
+            </section>
+        </aside>
+
+        <div class="resize-handle resize-handle-left" data-resize-panel="left" role="separator" aria-orientation="vertical" aria-label="Resize left panel"></div>
+
+        <section class="graph-panel">
+            <div class="graph-toolbar">
+                <div class="toolbar-group">
+                    <label for="depthInput">Depth</label>
+                    <select id="depthInput">
+                        <option value="all">All reachable</option>
+                        <option value="4" selected>4</option>
+                        <option value="5">5</option>
+                        <option value="6">6</option>
+                    </select>
+                </div>
+                <div class="toolbar-group">
+                    <label for="nodeLimitInput">Nodes</label>
+                    <input id="nodeLimitInput" type="number" min="25" max="1000" step="25" value="250">
+                </div>
+                <button id="layoutButton" class="tool-button" title="Recalculate layout">
+                    <i data-lucide="refresh-cw"></i>
+                    <span>Layout</span>
+                </button>
+                <button id="fitButton" class="tool-button" title="Fit graph">
+                    <i data-lucide="maximize"></i>
+                    <span>Fit</span>
+                </button>
+                <div class="status-pill" id="graphStatus">Idle</div>
+                <div class="settings-menu">
+                    <button id="settingsButton" class="icon-button" title="Graph settings" aria-label="Graph settings" aria-expanded="false">
+                        <i data-lucide="settings"></i>
+                    </button>
+                    <div id="settingsPanel" class="settings-panel hidden">
+                        <label class="check-control">
+                            <input id="hideEnumsInput" type="checkbox" checked>
+                            <span>Hide enums</span>
+                        </label>
+                        <label class="check-control">
+                            <input id="hideErrorResponsesInput" type="checkbox" checked>
+                            <span>Hide error responses</span>
+                        </label>
+                        <label class="range-control">
+                            <span>Horizontal gap <strong id="horizontalGapValue">1.2</strong></span>
+                            <input id="horizontalGapInput" type="range" min="0.8" max="2.2" step="0.1" value="1.2">
+                        </label>
+                        <label class="range-control">
+                            <span>Vertical gap <strong id="verticalGapValue">1.2</strong></span>
+                            <input id="verticalGapInput" type="range" min="0.8" max="2.2" step="0.1" value="1.2">
+                        </label>
+                        <button id="resetSettingsButton" class="settings-reset" type="button">Reset to defaults</button>
+                    </div>
+                </div>
+            </div>
+            <div id="graph"></div>
+            <div id="emptyGraph" class="empty-state">Select endpoints</div>
+        </section>
+
+        <div class="resize-handle resize-handle-right" data-resize-panel="right" role="separator" aria-orientation="vertical" aria-label="Resize right panel"></div>
+
+        <aside class="details-panel">
+            <div class="details-header">
+                <h2 id="detailsTitle">Details</h2>
+                <span id="detailsBadge"></span>
+            </div>
+            <div id="detailsBody" class="details-body"></div>
+        </aside>
+    </main>
+</body>
+</html>
