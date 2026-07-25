@@ -51,6 +51,19 @@ app.MapGet("/api/specs/{specId}/endpoints", (
     return Results.Ok(store.SearchEndpoints(specId, query, method, limit ?? 100));
 });
 
+app.MapGet("/api/specs/{specId}/schemas", (string specId, string? schemaId, OpenApiSpecStore store) =>
+{
+    if (string.IsNullOrWhiteSpace(schemaId))
+    {
+        return Results.BadRequest(new { error = "Provide a schemaId query parameter." });
+    }
+
+    var schema = store.GetSchema(specId, schemaId);
+    return schema is null
+        ? Results.NotFound(new { error = $"Schema '{schemaId}' was not found." })
+        : Results.Ok(schema);
+});
+
 app.MapPost("/api/specs/{specId}/graph", (string specId, GraphRequest request, OpenApiSpecStore store) =>
 {
     return Results.Ok(store.BuildGraph(specId, request));

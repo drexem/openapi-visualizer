@@ -48,6 +48,9 @@ public sealed class SchemaPropertyInfo
     public required string Name { get; init; }
     public string? Type { get; init; }
     public string? Format { get; init; }
+    public string? SourceSchemaId { get; init; }
+    public string? SourceSchemaName { get; init; }
+    public bool Inherited { get; init; }
     public bool Required { get; init; }
     public bool Nullable { get; init; }
     public string? RefId { get; init; }

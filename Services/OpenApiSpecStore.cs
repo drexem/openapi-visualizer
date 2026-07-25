@@ -71,6 +71,13 @@ public sealed class OpenApiSpecStore
             .ToArray();
     }
 
+    public SchemaInfo? GetSchema(string specId, string schemaIdOrName)
+    {
+        return _specs.TryGetValue(specId, out var index)
+            ? index.GetSchema(schemaIdOrName)
+            : null;
+    }
+
     public GraphResponse BuildGraph(string specId, GraphRequest request)
     {
         if (!_specs.TryGetValue(specId, out var index))
@@ -95,6 +102,15 @@ internal sealed class OpenApiIndex
     public required IReadOnlyDictionary<string, SchemaInfo> Schemas { get; init; }
     public required IReadOnlyDictionary<string, IReadOnlyList<SchemaEdge>> SchemaEdges { get; init; }
     public required IReadOnlyList<CycleInfo> Cycles { get; init; }
+
+    public SchemaInfo? GetSchema(string schemaIdOrName)
+    {
+        var schemaId = schemaIdOrName.StartsWith("schema:", StringComparison.Ordinal)
+            ? schemaIdOrName
+            : $"schema:{schemaIdOrName}";
+
+        return Schemas.TryGetValue(schemaId, out var schema) ? schema : null;
+    }
 
     public GraphResponse BuildGraph(GraphRequest request)
     {
@@ -244,6 +260,9 @@ internal sealed class OpenApiIndex
                 Name = property.Name,
                 Type = property.Type,
                 Format = property.Format,
+                SourceSchemaId = property.SourceSchemaId,
+                SourceSchemaName = property.SourceSchemaName,
+                Inherited = property.Inherited,
                 Required = property.Required,
                 Nullable = property.Nullable,
                 RefId = property.RefId,
@@ -343,18 +362,6 @@ internal static class OpenApiIndexBuilder
         foreach (var schemaProperty in schemasElement.EnumerateObject())
         {
             var schema = schemaProperty.Value;
-            var required = ReadStringArray(schema, "required").ToHashSet(StringComparer.Ordinal);
-            var properties = new List<SchemaPropertyInfo>();
-
-            if (schema.TryGetProperty("properties", out var propertiesElement) &&
-                propertiesElement.ValueKind == JsonValueKind.Object)
-            {
-                foreach (var property in propertiesElement.EnumerateObject())
-                {
-                    properties.Add(ReadPropertyInfo(property.Name, property.Value, required.Contains(property.Name)));
-                }
-            }
-
             var id = SchemaId(schemaProperty.Name);
             schemas[id] = new SchemaInfo
             {
@@ -363,12 +370,98 @@ internal static class OpenApiIndexBuilder
                 Type = ReadType(schema),
                 Format = ReadString(schema, "format"),
                 Description = ReadString(schema, "description"),
-                Properties = properties,
+                Properties = ReadSchemaProperties(root, schemaProperty.Name, schema),
                 EnumValues = ReadEnumValues(schema)
             };
         }
 
         return schemas;
+    }
+
+    private static IReadOnlyList<SchemaPropertyInfo> ReadSchemaProperties(JsonElement root, string schemaName, JsonElement schema)
+    {
+        var schemaId = SchemaId(schemaName);
+        var properties = new List<SchemaPropertyInfo>();
+        var seenSchemaIds = new HashSet<string>(StringComparer.Ordinal) { schemaId };
+
+        AddAllOfProperties(root, schema, schemaId, schemaName, properties, seenSchemaIds);
+        AddDirectProperties(schema, schemaId, schemaName, inherited: false, properties);
+        return properties;
+    }
+
+    private static void AddAllOfProperties(
+        JsonElement root,
+        JsonElement schema,
+        string owningSchemaId,
+        string owningSchemaName,
+        List<SchemaPropertyInfo> properties,
+        HashSet<string> seenSchemaIds)
+    {
+        if (schema.ValueKind != JsonValueKind.Object ||
+            !schema.TryGetProperty("allOf", out var allOf) ||
+            allOf.ValueKind != JsonValueKind.Array)
+        {
+            return;
+        }
+
+        var inlineIndex = 1;
+        foreach (var item in allOf.EnumerateArray())
+        {
+            if (TryDirectSchemaRef(item, out var parentSchemaId))
+            {
+                if (!seenSchemaIds.Add(parentSchemaId) || !TryGetSchemaElement(root, parentSchemaId, out var parentSchema))
+                {
+                    continue;
+                }
+
+                AddAllOfProperties(root, parentSchema, parentSchemaId, SchemaName(parentSchemaId), properties, seenSchemaIds);
+                AddDirectProperties(parentSchema, parentSchemaId, SchemaName(parentSchemaId), inherited: true, properties);
+                continue;
+            }
+
+            var inlineName = $"{owningSchemaName} allOf[{inlineIndex}]";
+            AddAllOfProperties(root, item, owningSchemaId, owningSchemaName, properties, seenSchemaIds);
+            AddDirectProperties(item, owningSchemaId, inlineName, inherited: false, properties);
+            inlineIndex++;
+        }
+    }
+
+    private static void AddDirectProperties(
+        JsonElement schema,
+        string sourceSchemaId,
+        string sourceSchemaName,
+        bool inherited,
+        List<SchemaPropertyInfo> properties)
+    {
+        if (schema.ValueKind != JsonValueKind.Object ||
+            !schema.TryGetProperty("properties", out var propertiesElement) ||
+            propertiesElement.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        var required = ReadStringArray(schema, "required").ToHashSet(StringComparer.Ordinal);
+        foreach (var property in propertiesElement.EnumerateObject())
+        {
+            AddOrReplaceProperty(
+                properties,
+                ReadPropertyInfo(property.Name, property.Value, required.Contains(property.Name), sourceSchemaId, sourceSchemaName, inherited));
+        }
+    }
+
+    private static void AddOrReplaceProperty(List<SchemaPropertyInfo> properties, SchemaPropertyInfo property)
+    {
+        var existingIndex = properties.FindIndex(existing => string.Equals(existing.Name, property.Name, StringComparison.Ordinal));
+        if (existingIndex < 0)
+        {
+            properties.Add(property);
+            return;
+        }
+
+        if (!property.Inherited || properties[existingIndex].Inherited)
+        {
+            properties[existingIndex] = property;
+        }
     }
 
     private static Dictionary<string, List<SchemaEdge>> ReadSchemaEdges(JsonElement root, IReadOnlyCollection<string> knownSchemaIds)
@@ -739,7 +832,13 @@ internal static class OpenApiIndexBuilder
         }
     }
 
-    private static SchemaPropertyInfo ReadPropertyInfo(string name, JsonElement property, bool required)
+    private static SchemaPropertyInfo ReadPropertyInfo(
+        string name,
+        JsonElement property,
+        bool required,
+        string sourceSchemaId,
+        string sourceSchemaName,
+        bool inherited)
     {
         var refId = TryDirectSchemaRef(property, out var directRef) ? directRef : null;
         var itemsRef = TryArrayItemsRef(property, out var itemRef) ? itemRef : null;
@@ -748,6 +847,9 @@ internal static class OpenApiIndexBuilder
             Name = name,
             Type = ReadType(property),
             Format = ReadString(property, "format"),
+            SourceSchemaId = sourceSchemaId,
+            SourceSchemaName = sourceSchemaName,
+            Inherited = inherited,
             Required = required,
             Nullable = ReadBool(property, "nullable"),
             RefId = refId,
@@ -941,6 +1043,14 @@ internal static class OpenApiIndexBuilder
                components.ValueKind == JsonValueKind.Object &&
                components.TryGetProperty("schemas", out schemas) &&
                schemas.ValueKind == JsonValueKind.Object;
+    }
+
+    private static bool TryGetSchemaElement(JsonElement root, string schemaId, out JsonElement schema)
+    {
+        schema = default;
+        return TryGetSchemas(root, out var schemas) &&
+               schemas.TryGetProperty(SchemaName(schemaId), out schema) &&
+               schema.ValueKind == JsonValueKind.Object;
     }
 
     private static bool TryDirectSchemaRef(JsonElement element, out string schemaId)

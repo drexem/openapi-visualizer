@@ -16,6 +16,8 @@ const panelWidthDefaults = {
     max: 560
 };
 
+const schemaExplorerMaxDepth = 24;
+
 const state = {
     specId: null,
     endpoints: [],
@@ -27,7 +29,13 @@ const state = {
     method: "",
     cy: null,
     lastGraph: null,
-    searchTimer: null
+    searchTimer: null,
+    currentDetailsNode: null,
+    schemaCache: new Map(),
+    schemaExplorerLoadErrors: new Set(),
+    schemaExplorerRootId: null,
+    schemaExplorerExpanded: new Set(),
+    schemaExplorerRows: new Map()
 };
 
 const els = {
@@ -76,6 +84,12 @@ const els = {
     detailsTitle: document.getElementById("detailsTitle"),
     detailsBadge: document.getElementById("detailsBadge"),
     detailsBody: document.getElementById("detailsBody"),
+    graphNodeActions: null,
+    schemaExplorerOverlay: document.getElementById("schemaExplorerOverlay"),
+    schemaExplorerCloseButton: document.getElementById("schemaExplorerCloseButton"),
+    schemaExplorerTitle: document.getElementById("schemaExplorerTitle"),
+    schemaExplorerBadge: document.getElementById("schemaExplorerBadge"),
+    schemaExplorerBody: document.getElementById("schemaExplorerBody"),
     resizeHandles: document.querySelectorAll("[data-resize-panel]")
 };
 
@@ -130,6 +144,30 @@ function wireEvents() {
         event.stopPropagation();
         setDetailsPanelCollapsed(false);
     });
+    els.detailsBody?.addEventListener("click", event => {
+        const button = event.target.closest("[data-open-schema-explorer]");
+        if (!button || !state.currentDetailsNode) {
+            return;
+        }
+
+        event.preventDefault();
+        openSchemaExplorer(state.currentDetailsNode);
+    });
+    els.schemaExplorerCloseButton?.addEventListener("click", closeSchemaExplorer);
+    els.schemaExplorerOverlay?.addEventListener("click", event => {
+        if (event.target === els.schemaExplorerOverlay) {
+            closeSchemaExplorer();
+        }
+    });
+    els.schemaExplorerBody?.addEventListener("click", event => {
+        const toggle = event.target.closest("[data-schema-toggle]");
+        if (!toggle) {
+            return;
+        }
+
+        event.preventDefault();
+        toggleSchemaExplorerRow(toggle.dataset.schemaToggle);
+    });
 
     els.clearSelection.addEventListener("click", () => {
         state.selected.clear();
@@ -160,6 +198,11 @@ function wireEvents() {
     document.addEventListener("click", () => setSettingsOpen(false));
     document.addEventListener("keydown", event => {
         if (event.key === "Escape") {
+            if (!els.schemaExplorerOverlay?.classList.contains("hidden")) {
+                closeSchemaExplorer();
+                return;
+            }
+
             setSettingsOpen(false);
         }
     });
@@ -401,7 +444,11 @@ async function importSpec() {
         const summary = await response.json();
         state.specId = summary.specId;
         state.selected.clear();
-        els.specMeta.textContent = `${summary.title} ${summary.version} - ${summary.endpointCount} endpoints - ${summary.schemaCount} schemas - ${summary.cycleCount} cycles`;
+        state.currentDetailsNode = null;
+        state.schemaCache.clear();
+        state.schemaExplorerLoadErrors.clear();
+        closeSchemaExplorer();
+        renderSpecMeta(summary);
         await loadAllEndpoints();
         await loadEndpoints();
         renderSelected();
@@ -411,7 +458,18 @@ async function importSpec() {
         console.error(error);
         setStatus("Import failed");
         els.specMeta.textContent = "Import failed";
+        els.specMeta.title = "";
     }
+}
+
+function renderSpecMeta(summary) {
+    els.specMeta.textContent = summary.title || "OpenAPI spec";
+    els.specMeta.title = [
+        summary.version ? `Version: ${summary.version}` : "",
+        `${summary.endpointCount} endpoints`,
+        `${summary.schemaCount} schemas`,
+        `${summary.cycleCount} cycles`
+    ].filter(value => String(value || "").trim().length > 0).join(" - ");
 }
 
 async function loadEndpoints() {
@@ -655,14 +713,21 @@ function initializeGraph() {
         ]
     });
 
+    els.graphNodeActions = document.createElement("div");
+    els.graphNodeActions.id = "graphNodeActions";
+    els.graphNodeActions.className = "graph-node-actions";
+    els.graph.appendChild(els.graphNodeActions);
+
     state.cy.on("tap", "node", event => renderDetails(event.target.data()));
     state.cy.on("tap", "edge", event => renderEdgeDetails(event.target.data()));
+    state.cy.on("pan zoom resize position render", updateGraphNodeActionPositions);
 }
 
 async function updateGraph() {
     if (!state.specId || state.selected.size === 0) {
         state.lastGraph = null;
         state.cy.elements().remove();
+        renderGraphNodeActions();
         els.emptyGraph.classList.remove("hidden");
         setStatus("Idle");
         renderDetails(null);
@@ -746,10 +811,164 @@ function renderGraph(graph) {
 
     state.cy.elements().remove();
     state.cy.add(elements);
+    renderGraphNodeActions();
     runLayout();
 
     const warning = graph.warnings?.[0] ? ` - ${graph.warnings[0]}` : "";
     setStatus(`${graph.nodes.length} nodes - ${graph.edges.length} edges - ${graph.cycles.length} cycles${warning}`);
+}
+
+function renderGraphNodeActions() {
+    if (!els.graphNodeActions || !state.cy) {
+        return;
+    }
+
+    els.graphNodeActions.innerHTML = "";
+    state.cy.nodes().forEach(node => {
+        const data = node.data();
+        const copyText = graphNodeCopyText(data);
+        if (!copyText) {
+            return;
+        }
+
+        const button = document.createElement("button");
+        button.className = "graph-node-copy-button";
+        button.type = "button";
+        button.dataset.nodeId = node.id();
+        button.dataset.copyText = copyText;
+        button.title = data.kind === "endpoint" ? "Copy endpoint path" : "Copy model name";
+        button.setAttribute("aria-label", button.title);
+        button.innerHTML = `<i data-lucide="copy"></i>`;
+        stopGraphPointerEvents(button);
+        button.addEventListener("click", async event => {
+            event.preventDefault();
+            event.stopPropagation();
+            await copyGraphNodeText(button);
+        });
+        els.graphNodeActions.appendChild(button);
+    });
+
+    updateGraphNodeActionPositions();
+    refreshIcons();
+}
+
+function updateGraphNodeActionPositions() {
+    if (!els.graphNodeActions || !state.cy) {
+        return;
+    }
+
+    els.graphNodeActions.querySelectorAll(".graph-node-copy-button").forEach(button => {
+        const node = state.cy.getElementById(button.dataset.nodeId);
+        if (!node || node.empty() || !node.visible()) {
+            button.classList.add("hidden");
+            return;
+        }
+
+        const position = node.renderedPosition();
+        const zoom = state.cy.zoom();
+        const renderedWidth = node.renderedWidth();
+        const renderedHeight = node.renderedHeight();
+        const size = graphNodeCopyButtonSize(renderedWidth, renderedHeight);
+        if (size === 0) {
+            button.classList.add("hidden");
+            return;
+        }
+
+        const inset = Math.max(3, Math.round(size * 0.18));
+        const x = position.x + renderedWidth / 2 - size - inset;
+        const y = position.y + renderedHeight / 2 - size - inset;
+
+        button.classList.toggle("hidden", !Number.isFinite(x) || !Number.isFinite(y));
+        button.style.setProperty("--copy-button-size", `${size}px`);
+        button.style.setProperty("--copy-icon-size", `${Math.max(8, Math.round(size * 0.58))}px`);
+        button.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
+    });
+}
+
+function stopGraphPointerEvents(element) {
+    for (const eventName of ["pointerdown", "pointerup", "mousedown", "mouseup", "touchstart", "touchend", "dblclick"]) {
+        element.addEventListener(eventName, event => {
+            event.stopPropagation();
+        });
+    }
+}
+
+function graphNodeCopyButtonSize(renderedWidth, renderedHeight) {
+    const maxContainedSize = Math.min(renderedWidth, renderedHeight) - 8;
+    if (maxContainedSize < 14) {
+        return 0;
+    }
+
+    return Math.round(Math.min(20, maxContainedSize));
+}
+
+function graphNodeCopyText(data) {
+    if (data.kind === "endpoint") {
+        return data.rawLabel || data.label || "";
+    }
+
+    if (isSchemaNode(data)) {
+        return stripSchemaPrefix(data.id || data.rawLabel || data.label || "");
+    }
+
+    return data.rawLabel || data.label || "";
+}
+
+async function copyGraphNodeText(button) {
+    const value = button.dataset.copyText || "";
+    if (!value) {
+        return;
+    }
+
+    try {
+        await writeClipboardText(value);
+        showGraphNodeCopyState(button, "copied");
+    } catch (error) {
+        console.error(error);
+        showGraphNodeCopyState(button, "failed");
+    }
+}
+
+async function writeClipboardText(value) {
+    if (navigator.clipboard?.writeText) {
+        try {
+            await navigator.clipboard.writeText(value);
+            return;
+        } catch {
+            // Some browser contexts expose navigator.clipboard but still reject writes.
+        }
+    }
+
+    const input = document.createElement("textarea");
+    input.value = value;
+    input.setAttribute("readonly", "");
+    input.style.position = "fixed";
+    input.style.left = "-9999px";
+    input.style.top = "0";
+    document.body.appendChild(input);
+    input.focus();
+    input.select();
+    input.setSelectionRange(0, input.value.length);
+    const copied = document.execCommand("copy");
+    input.remove();
+    if (!copied) {
+        throw new Error("Clipboard copy failed.");
+    }
+}
+
+function showGraphNodeCopyState(button, stateName) {
+    button.classList.remove("copied", "failed");
+    button.classList.add(stateName);
+    button.innerHTML = `<i data-lucide="${stateName === "copied" ? "check" : "x"}"></i>`;
+    button.title = stateName === "copied" ? "Copied" : "Copy failed";
+    refreshIcons();
+
+    window.setTimeout(() => {
+        button.classList.remove("copied", "failed");
+        button.innerHTML = `<i data-lucide="copy"></i>`;
+        button.title = button.getAttribute("aria-label") || "Copy";
+        refreshIcons();
+    }, 1200);
 }
 
 function nodeMetrics(node) {
@@ -955,6 +1174,7 @@ function runLayout() {
     layout.one("layoutstop", () => {
         applyLeftToRightLayout(roots, horizontalGap, verticalGap);
         state.cy.fit(undefined, 40);
+        window.requestAnimationFrame(updateGraphNodeActionPositions);
     });
     layout.run();
 }
@@ -1053,6 +1273,7 @@ function packedColumnYPositions(nodes, verticalGap) {
 }
 
 function renderDetails(data) {
+    state.currentDetailsNode = data;
     if (!data) {
         els.detailsTitle.textContent = "Details";
         els.detailsBadge.textContent = "";
@@ -1066,13 +1287,15 @@ function renderDetails(data) {
     }
 
     els.detailsTitle.textContent = data.rawLabel || data.label;
-    els.detailsBadge.textContent = data.method || data.kind;
-    els.detailsBody.innerHTML = renderNodeSummary(data, false);
+    els.detailsBadge.textContent = "";
+    els.detailsBody.innerHTML = renderNodeSummary(data, false) + renderSchemaExplorerAction(data);
+    refreshIcons();
 }
 
 function renderEdgeDetails(data) {
+    state.currentDetailsNode = null;
     els.detailsTitle.textContent = data.kind;
-    els.detailsBadge.textContent = "edge";
+    els.detailsBadge.textContent = "";
     els.detailsBody.innerHTML = `
         <div class="detail-block">
             <div class="detail-label">Label</div>
@@ -1086,6 +1309,19 @@ function renderEdgeDetails(data) {
             <div class="detail-label">Target</div>
             <div class="detail-value">${escapeHtml(data.target)}</div>
         </div>
+    `;
+}
+
+function renderSchemaExplorerAction(data) {
+    if (!isSchemaNode(data)) {
+        return "";
+    }
+
+    return `
+        <button class="schema-explorer-button" type="button" data-open-schema-explorer>
+            <i data-lucide="list-tree"></i>
+            <span>Even more details!</span>
+        </button>
     `;
 }
 
@@ -1103,28 +1339,6 @@ function renderNodeSummary(data, compact) {
             </div>
         `;
     } else {
-        html += `
-            <div class="detail-block">
-                <div class="detail-label">Id</div>
-                <div class="detail-value">${escapeHtml(data.id)}</div>
-            </div>
-        `;
-        if (data.subtitle) {
-            html += `
-                <div class="detail-block">
-                    <div class="detail-label">Summary</div>
-                    <div class="detail-value">${escapeHtml(data.subtitle)}</div>
-                </div>
-            `;
-        }
-        if (data.cycleId) {
-            html += `
-                <div class="detail-block">
-                    <div class="detail-label">Cycle</div>
-                    <div class="detail-value">${escapeHtml(String(data.cycleId))}</div>
-                </div>
-            `;
-        }
         if (tags.length > 0) {
             html += `
                 <div class="detail-block">
@@ -1155,23 +1369,15 @@ function renderNodeSummary(data, compact) {
         return html;
     }
 
-    const propertyRows = props.map(prop => `
-        <div class="property-row property-kind-${propertyKind(prop)}">
-            <div class="property-main">
-                <span class="property-name">${prop.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(prop.name)}</span>
-                ${prop.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(prop.enumValues)}</div>` : ""}
-            </div>
-            <span class="property-type">${escapeHtml(propertyType(prop))}</span>
-        </div>
-    `).join("");
+    const propertyRows = renderPropertyGroups(props, prop => renderPropertyRow(prop), "property-list");
 
     if (compact) {
-        html += `<div class="property-list">${propertyRows}</div>`;
+        html += propertyRows;
     } else {
         html += `
             <div class="detail-block">
                 <div class="detail-label">Properties</div>
-                <div class="property-list">${propertyRows}</div>
+                ${propertyRows}
             </div>
         `;
     }
@@ -1179,10 +1385,300 @@ function renderNodeSummary(data, compact) {
     return html;
 }
 
+function renderPropertyRow(prop) {
+    return `
+        <div class="property-row property-kind-${propertyKind(prop)} ${prop.inherited ? "inherited" : ""}">
+            <div class="property-main">
+                <span class="property-name">${prop.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(prop.name)}</span>
+                ${prop.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(prop.enumValues)}</div>` : ""}
+            </div>
+            <span class="property-type">${escapeHtml(propertyType(prop))}</span>
+        </div>
+    `;
+}
+
+function renderPropertyGroups(props, rowRenderer, className) {
+    const groups = groupPropertiesBySource(props);
+    return `
+        <div class="${className}">
+            ${groups.map(group => `
+                <div class="property-group ${group.inherited ? "inherited" : "local"}">
+                    <div class="property-group-title">${escapeHtml(group.label)}</div>
+                    <div class="property-group-rows">${group.entries.map(entry => rowRenderer(entry.property, entry.index)).join("")}</div>
+                </div>
+            `).join("")}
+        </div>
+    `;
+}
+
+function groupPropertiesBySource(props) {
+    const indexed = props.map((property, index) => ({ property, index }));
+    const local = indexed.filter(entry => !entry.property.inherited);
+    const inherited = indexed.filter(entry => entry.property.inherited);
+    const groups = [];
+
+    if (local.length > 0) {
+        groups.push({
+            label: "Declared properties",
+            inherited: false,
+            entries: local
+        });
+    }
+
+    for (const entry of inherited) {
+        const prop = entry.property;
+        const sourceName = prop.sourceSchemaName || "Inherited schema";
+        let group = groups.find(item => item.inherited && item.sourceName === sourceName);
+        if (!group) {
+            group = {
+                label: `Inherited from ${sourceName}`,
+                sourceName,
+                inherited: true,
+                entries: []
+            };
+            groups.push(group);
+        }
+
+        group.entries.push(entry);
+    }
+
+    if (groups.length === 0 && props.length > 0) {
+        groups.push({
+            label: "Properties",
+            inherited: false,
+            entries: indexed
+        });
+    }
+
+    return groups;
+}
+
 function renderEnumChips(values) {
     return values
         .map(value => `<span class="enum-chip">${escapeHtml(value)}</span>`)
         .join("");
+}
+
+async function openSchemaExplorer(data) {
+    if (!state.specId || !isSchemaNode(data)) {
+        return;
+    }
+
+    const rootId = data.id;
+    state.schemaExplorerRootId = rootId;
+    state.schemaExplorerExpanded.clear();
+    state.schemaExplorerRows.clear();
+    state.schemaCache.set(rootId, normalizeSchema(data));
+    els.schemaExplorerOverlay?.classList.remove("hidden");
+    document.body.classList.add("schema-explorer-open");
+    renderSchemaExplorer();
+
+    try {
+        await loadSchema(rootId);
+        renderSchemaExplorer();
+    } catch (error) {
+        console.error(error);
+    }
+}
+
+function closeSchemaExplorer() {
+    els.schemaExplorerOverlay?.classList.add("hidden");
+    document.body.classList.remove("schema-explorer-open");
+    state.schemaExplorerRootId = null;
+    state.schemaExplorerExpanded.clear();
+    state.schemaExplorerRows.clear();
+    state.schemaExplorerLoadErrors.clear();
+}
+
+async function toggleSchemaExplorerRow(pathKey) {
+    const row = state.schemaExplorerRows.get(pathKey);
+    if (!row) {
+        return;
+    }
+
+    if (state.schemaExplorerExpanded.has(pathKey)) {
+        state.schemaExplorerExpanded.delete(pathKey);
+        renderSchemaExplorer();
+        return;
+    }
+
+    state.schemaExplorerExpanded.add(pathKey);
+    renderSchemaExplorer();
+
+    try {
+        await loadSchema(row.refId);
+    } catch (error) {
+        console.error(error);
+        state.schemaExplorerLoadErrors.add(row.refId);
+    }
+
+    renderSchemaExplorer();
+}
+
+async function loadSchema(schemaId) {
+    if (!state.specId || state.schemaCache.has(schemaId) && state.schemaCache.get(schemaId).fullyLoaded) {
+        return state.schemaCache.get(schemaId);
+    }
+
+    state.schemaExplorerLoadErrors.delete(schemaId);
+
+    const params = new URLSearchParams({ schemaId });
+    const response = await fetch(`/api/specs/${state.specId}/schemas?${params}`);
+    if (!response.ok) {
+        throw new Error(await response.text());
+    }
+
+    const schema = normalizeSchema(await response.json(), true);
+    state.schemaCache.set(schema.id, schema);
+    return schema;
+}
+
+function renderSchemaExplorer() {
+    state.schemaExplorerRows.clear();
+    const root = state.schemaCache.get(state.schemaExplorerRootId);
+    if (!root) {
+        els.schemaExplorerTitle.textContent = "Model details";
+        els.schemaExplorerBadge.textContent = "";
+        els.schemaExplorerBody.innerHTML = `<div class="schema-tree-message">Loading schema</div>`;
+        return;
+    }
+
+    els.schemaExplorerTitle.textContent = root.label;
+    els.schemaExplorerBadge.textContent = root.subtitle || root.kind;
+    els.schemaExplorerBody.innerHTML = renderSchemaTreeNode(root, "root", [root.id], 0);
+    refreshIcons();
+}
+
+function renderSchemaTreeNode(schema, pathKey, trail, depth) {
+    const props = schema.properties || [];
+    const enumValues = schema.enumValues || [];
+    const type = schema.type || "object";
+    const meta = [
+        type,
+        schema.format,
+        schema.nullable ? "nullable" : "",
+        schema.cycleId ? `cycle ${schema.cycleId}` : ""
+    ].filter(Boolean);
+
+    const enumHtml = enumValues.length
+        ? `<div class="schema-tree-enums">${renderEnumChips(enumValues)}</div>`
+        : "";
+    const descriptionHtml = schema.description
+        ? `<div class="schema-tree-description">${escapeHtml(schema.description)}</div>`
+        : "";
+
+    const propertiesHtml = props.length
+        ? renderPropertyGroups(
+            props,
+            (prop, index) => renderSchemaTreeProperty(prop, `${pathKey}.${index}`, trail, depth),
+            "schema-tree-properties")
+        : `<div class="schema-tree-empty">No properties</div>`;
+
+    return `
+        <div class="schema-tree-node" style="--schema-depth: ${depth}">
+            <div class="schema-tree-model">
+                <div class="schema-tree-model-main">
+                    <div class="schema-tree-model-name">${escapeHtml(schema.label)}</div>
+                    <div class="schema-tree-model-meta">${meta.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>
+                </div>
+                <span class="schema-tree-property-count">${props.length}</span>
+            </div>
+            ${descriptionHtml}
+            ${enumHtml}
+            ${propertiesHtml}
+        </div>
+    `;
+}
+
+function renderSchemaTreeProperty(prop, pathKey, trail, depth) {
+    const refId = prop.itemsRefId || prop.refId || "";
+    const hasRef = Boolean(refId);
+    const isCycle = hasRef && trail.includes(refId);
+    const atMaxDepth = depth >= schemaExplorerMaxDepth;
+    const canExpand = hasRef && !isCycle && !atMaxDepth;
+    const expanded = canExpand && state.schemaExplorerExpanded.has(pathKey);
+    const child = expanded ? state.schemaCache.get(refId) : null;
+    const nextTrail = hasRef ? [...trail, refId] : trail;
+
+    if (canExpand) {
+        state.schemaExplorerRows.set(pathKey, { refId });
+    }
+
+    const toggle = canExpand
+        ? `
+            <button class="schema-tree-toggle" type="button" data-schema-toggle="${escapeHtml(pathKey)}" aria-expanded="${expanded}" title="${expanded ? "Collapse model" : "Expand model"}" aria-label="${expanded ? "Collapse model" : "Expand model"}">
+                <i data-lucide="${expanded ? "chevron-down" : "chevron-right"}"></i>
+            </button>
+        `
+        : `<span class="schema-tree-toggle-placeholder"></span>`;
+
+    const extra = isCycle
+        ? `<span class="schema-tree-note">cycle</span>`
+        : atMaxDepth && hasRef
+            ? `<span class="schema-tree-note">depth limit</span>`
+            : prop.nullable
+                ? `<span class="schema-tree-note">nullable</span>`
+                : "";
+    const childHtml = expanded
+        ? state.schemaExplorerLoadErrors.has(refId)
+            ? `<div class="schema-tree-loading error">Could not load ${escapeHtml(stripSchemaPrefix(refId))}</div>`
+            : child
+            ? renderSchemaTreeNode(child, pathKey, nextTrail, depth + 1)
+            : `<div class="schema-tree-loading">Loading ${escapeHtml(stripSchemaPrefix(refId))}</div>`
+        : "";
+
+    return `
+        <div class="schema-tree-property property-kind-${propertyKind(prop)}">
+            <div class="schema-tree-property-row">
+                ${toggle}
+                <div class="schema-tree-property-main">
+                    <span class="schema-tree-property-name">${prop.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(prop.name)}</span>
+                    ${prop.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(prop.enumValues)}</div>` : ""}
+                </div>
+                ${extra}
+                <span class="property-type">${escapeHtml(propertyType(prop))}</span>
+            </div>
+            ${childHtml}
+        </div>
+    `;
+}
+
+function normalizeSchema(schema, fullyLoaded = false) {
+    const id = schema.id || schema.schemaId || `schema:${schema.name || schema.label || ""}`;
+    const properties = schema.properties || [];
+    const enumValues = schema.enumValues || [];
+    const label = schema.rawLabel || schema.label || schema.name || stripSchemaPrefix(id);
+
+    return {
+        id,
+        kind: "schema",
+        label,
+        rawLabel: label,
+        subtitle: schema.subtitle || schemaSubtitle(schema, properties, enumValues),
+        type: schema.type,
+        format: schema.format,
+        description: schema.description,
+        properties,
+        enumValues,
+        nullable: schema.nullable,
+        cycleId: schema.cycleId,
+        fullyLoaded
+    };
+}
+
+function schemaSubtitle(schema, properties, enumValues) {
+    const type = schema.type || "schema";
+    const enumText = enumValues.length === 0
+        ? ""
+        : enumValues.length === 1 ? "1 enum value" : `${enumValues.length} enum values`;
+    const propertyText = properties.length === 0
+        ? ""
+        : properties.length === 1 ? "1 property" : `${properties.length} properties`;
+    return [type, enumText, propertyText].filter(Boolean).join(" - ");
+}
+
+function isSchemaNode(data) {
+    return data?.kind === "schema" || String(data?.id || "").startsWith("schema:");
 }
 
 function propertyType(prop) {
