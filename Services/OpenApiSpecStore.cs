@@ -1139,6 +1139,11 @@ internal static class OpenApiIndexBuilder
             return null;
         }
 
+        if (element.TryGetProperty("enum", out var enumElement) && enumElement.ValueKind == JsonValueKind.Array)
+        {
+            return "enum";
+        }
+
         if (element.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String)
         {
             if (string.Equals(type.GetString(), "array", StringComparison.OrdinalIgnoreCase) &&

@@ -1555,37 +1555,42 @@ function renderSchemaTreeNode(schema, pathKey, trail, depth) {
     const type = schema.type || "object";
     const meta = [
         type,
-        schema.format,
-        schema.nullable ? "nullable" : "",
-        schema.cycleId ? `cycle ${schema.cycleId}` : ""
+        schema.format
     ].filter(Boolean);
 
     const enumHtml = enumValues.length
-        ? `<div class="schema-tree-enums">${renderEnumChips(enumValues)}</div>`
-        : "";
-    const descriptionHtml = schema.description
-        ? `<div class="schema-tree-description">${escapeHtml(schema.description)}</div>`
+        ? `<div class="schema-tree-properties">${enumValues.map(value => renderSchemaTreeValueRow(value)).join("")}</div>`
         : "";
 
     const propertiesHtml = props.length
-        ? renderPropertyGroups(
-            props,
-            (prop, index) => renderSchemaTreeProperty(prop, `${pathKey}.${index}`, trail, depth),
-            "schema-tree-properties")
-        : `<div class="schema-tree-empty">No properties</div>`;
+        ? `<div class="schema-tree-properties">${props.map((prop, index) => renderSchemaTreeProperty(prop, `${pathKey}.${index}`, trail, depth)).join("")}</div>`
+        : enumValues.length === 0 ? `<div class="schema-tree-empty">No properties</div>` : "";
 
     return `
-        <div class="schema-tree-node" style="--schema-depth: ${depth}">
+        <div class="schema-tree-node schema-tree-level-${depth % 4}" style="--schema-depth: ${depth}">
             <div class="schema-tree-model">
                 <div class="schema-tree-model-main">
                     <div class="schema-tree-model-name">${escapeHtml(schema.label)}</div>
                     <div class="schema-tree-model-meta">${meta.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>
                 </div>
-                <span class="schema-tree-property-count">${props.length}</span>
             </div>
-            ${descriptionHtml}
             ${enumHtml}
             ${propertiesHtml}
+        </div>
+    `;
+}
+
+function renderSchemaTreeValueRow(value) {
+    return `
+        <div class="schema-tree-property">
+            <div class="schema-tree-property-row">
+                <span class="schema-tree-toggle-placeholder"></span>
+                <span class="schema-tree-origin-badge declared" title="Declared">d</span>
+                <div class="schema-tree-property-main">
+                    <span class="schema-tree-property-name">${escapeHtml(value)}</span>
+                </div>
+                <span class="property-type">enum value</span>
+            </div>
         </div>
     `;
 }
@@ -1616,9 +1621,7 @@ function renderSchemaTreeProperty(prop, pathKey, trail, depth) {
         ? `<span class="schema-tree-note">cycle</span>`
         : atMaxDepth && hasRef
             ? `<span class="schema-tree-note">depth limit</span>`
-            : prop.nullable
-                ? `<span class="schema-tree-note">nullable</span>`
-                : "";
+            : "";
     const childHtml = expanded
         ? state.schemaExplorerLoadErrors.has(refId)
             ? `<div class="schema-tree-loading error">Could not load ${escapeHtml(stripSchemaPrefix(refId))}</div>`
@@ -1631,16 +1634,30 @@ function renderSchemaTreeProperty(prop, pathKey, trail, depth) {
         <div class="schema-tree-property property-kind-${propertyKind(prop)}">
             <div class="schema-tree-property-row">
                 ${toggle}
+                <span class="schema-tree-origin-badge ${prop.inherited ? "inherited" : "declared"}" title="${prop.inherited ? `Inherited from ${escapeHtml(prop.sourceSchemaName || "schema")}` : "Declared"}">${prop.inherited ? "i" : "d"}</span>
                 <div class="schema-tree-property-main">
                     <span class="schema-tree-property-name">${prop.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(prop.name)}</span>
                     ${prop.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(prop.enumValues)}</div>` : ""}
                 </div>
                 ${extra}
-                <span class="property-type">${escapeHtml(propertyType(prop))}</span>
+                <span class="property-type">${escapeHtml(schemaTreePropertyType(prop))}</span>
             </div>
             ${childHtml}
         </div>
     `;
+}
+
+function schemaTreePropertyType(prop) {
+    if (prop.enumValues?.length) {
+        return "enum";
+    }
+
+    const refId = prop.itemsRefId || prop.refId;
+    if (refId && state.schemaCache.get(refId)?.enumValues?.length) {
+        return prop.itemsRefId ? "enum[]" : "enum";
+    }
+
+    return propertyType(prop);
 }
 
 function normalizeSchema(schema, fullyLoaded = false) {
