@@ -138,8 +138,10 @@ internal sealed class OpenApiIndex
 
             foreach (var schemaUse in endpoint.SchemaUses)
             {
+                const int endpointSchemaDepth = 1;
                 if (!IsVisibleSchema(schemaUse.SchemaId) ||
-                    (request.HideErrorResponses && IsErrorResponseUse(schemaUse)))
+                    (request.HideErrorResponses && IsErrorResponseUse(schemaUse)) ||
+                    endpointSchemaDepth > depth)
                 {
                     continue;
                 }
@@ -147,10 +149,10 @@ internal sealed class OpenApiIndex
                 AddSchemaNode(schemaUse.SchemaId);
                 AddEdge(endpoint.Id, schemaUse.SchemaId, schemaUse.Kind, schemaUse.Label);
 
-                if (!schemaDepth.TryGetValue(schemaUse.SchemaId, out var knownDepth) || knownDepth > 0)
+                if (!schemaDepth.TryGetValue(schemaUse.SchemaId, out var knownDepth) || knownDepth > endpointSchemaDepth)
                 {
-                    schemaDepth[schemaUse.SchemaId] = 0;
-                    queue.Enqueue((schemaUse.SchemaId, 0));
+                    schemaDepth[schemaUse.SchemaId] = endpointSchemaDepth;
+                    queue.Enqueue((schemaUse.SchemaId, endpointSchemaDepth));
                 }
             }
         }
@@ -171,7 +173,8 @@ internal sealed class OpenApiIndex
 
             foreach (var schemaEdge in outgoing)
             {
-                if (!IsVisibleSchema(schemaEdge.TargetSchemaId))
+                var nextDepth = currentDepth + 1;
+                if (nextDepth > depth || !IsVisibleSchema(schemaEdge.TargetSchemaId))
                 {
                     continue;
                 }
@@ -179,7 +182,6 @@ internal sealed class OpenApiIndex
                 AddSchemaNode(schemaEdge.TargetSchemaId);
                 AddEdge(schemaEdge.SourceSchemaId, schemaEdge.TargetSchemaId, schemaEdge.Kind, schemaEdge.Label);
 
-                var nextDepth = currentDepth + 1;
                 if ((!schemaDepth.TryGetValue(schemaEdge.TargetSchemaId, out var knownDepth) || nextDepth < knownDepth) &&
                     nextDepth <= depth)
                 {

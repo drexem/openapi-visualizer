@@ -1,8 +1,12 @@
 const graphSettingDefaults = {
     hideEnums: true,
     hideErrorResponses: true,
-    horizontalGap: 1.2,
-    verticalGap: 1.2
+    horizontalGap: 1.4,
+    verticalGap: 1.4,
+    nodeWidth: 1,
+    nodeHeight: 1,
+    nodeTextSize: 1,
+    edgeTextSize: 1
 };
 
 const panelWidthDefaults = {
@@ -18,6 +22,7 @@ const state = {
     allEndpoints: [],
     selected: new Map(),
     favorites: readFavoriteEndpoints(),
+    detailsCollapsed: readDetailsCollapsed(),
     collapsedSections: new Set(),
     method: "",
     cy: null,
@@ -26,10 +31,12 @@ const state = {
 };
 
 const els = {
+    appShell: document.querySelector(".app-shell"),
     fileInput: document.getElementById("fileInput"),
     fileLabel: document.getElementById("fileLabel"),
     specMeta: document.getElementById("specMeta"),
     endpointSearch: document.getElementById("endpointSearch"),
+    methodFiltersToggle: document.getElementById("methodFiltersToggle"),
     methodFilters: document.getElementById("methodFilters"),
     favoriteList: document.getElementById("favoriteList"),
     favoriteCount: document.getElementById("favoriteCount"),
@@ -48,12 +55,24 @@ const els = {
     horizontalGapValue: document.getElementById("horizontalGapValue"),
     verticalGapInput: document.getElementById("verticalGapInput"),
     verticalGapValue: document.getElementById("verticalGapValue"),
+    nodeWidthInput: document.getElementById("nodeWidthInput"),
+    nodeWidthValue: document.getElementById("nodeWidthValue"),
+    nodeHeightInput: document.getElementById("nodeHeightInput"),
+    nodeHeightValue: document.getElementById("nodeHeightValue"),
+    nodeTextSizeInput: document.getElementById("nodeTextSizeInput"),
+    nodeTextSizeValue: document.getElementById("nodeTextSizeValue"),
+    edgeTextSizeInput: document.getElementById("edgeTextSizeInput"),
+    edgeTextSizeValue: document.getElementById("edgeTextSizeValue"),
     resetSettingsButton: document.getElementById("resetSettingsButton"),
     layoutButton: document.getElementById("layoutButton"),
     fitButton: document.getElementById("fitButton"),
     graphStatus: document.getElementById("graphStatus"),
     graph: document.getElementById("graph"),
     emptyGraph: document.getElementById("emptyGraph"),
+    detailsPanel: document.querySelector(".details-panel"),
+    rightResizeHandle: document.querySelector(".resize-handle-right"),
+    detailsExpandButton: document.getElementById("detailsExpandButton"),
+    detailsCollapseButton: document.getElementById("detailsCollapseButton"),
     detailsTitle: document.getElementById("detailsTitle"),
     detailsBadge: document.getElementById("detailsBadge"),
     detailsBody: document.getElementById("detailsBody"),
@@ -62,6 +81,7 @@ const els = {
 
 window.addEventListener("DOMContentLoaded", () => {
     restorePanelWidths();
+    setDetailsPanelCollapsed(state.detailsCollapsed, false);
     wireEvents();
     initializeGraph();
     renderSectionCollapse();
@@ -74,6 +94,10 @@ function wireEvents() {
     els.endpointSearch.addEventListener("input", () => {
         clearTimeout(state.searchTimer);
         state.searchTimer = setTimeout(loadEndpoints, 160);
+    });
+
+    els.methodFiltersToggle.addEventListener("click", () => {
+        setMethodFiltersCollapsed(!els.methodFilters.classList.contains("collapsed"));
     });
 
     els.methodFilters.addEventListener("click", event => {
@@ -96,6 +120,17 @@ function wireEvents() {
         handle.addEventListener("pointerdown", startPanelResize);
     });
 
+    els.detailsCollapseButton?.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        setDetailsPanelCollapsed(true);
+    });
+    els.detailsExpandButton?.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        setDetailsPanelCollapsed(false);
+    });
+
     els.clearSelection.addEventListener("click", () => {
         state.selected.clear();
         renderFavorites();
@@ -115,6 +150,10 @@ function wireEvents() {
     els.hideErrorResponsesInput.addEventListener("change", updateGraph);
     els.horizontalGapInput.addEventListener("input", updateGraphGaps);
     els.verticalGapInput.addEventListener("input", updateGraphGaps);
+    els.nodeWidthInput.addEventListener("input", updateGraphSizing);
+    els.nodeHeightInput.addEventListener("input", updateGraphSizing);
+    els.nodeTextSizeInput.addEventListener("input", updateGraphSizing);
+    els.edgeTextSizeInput.addEventListener("input", updateGraphSizing);
     els.resetSettingsButton.addEventListener("click", resetGraphSettings);
     els.layoutButton.addEventListener("click", runLayout);
     els.fitButton.addEventListener("click", () => state.cy?.fit(undefined, 40));
@@ -152,6 +191,42 @@ function savePanelWidths(widths) {
     }
 }
 
+function readDetailsCollapsed() {
+    try {
+        return localStorage.getItem("openapi-visualizer:details-collapsed") === "true";
+    } catch {
+        return false;
+    }
+}
+
+function saveDetailsCollapsed(collapsed) {
+    try {
+        localStorage.setItem("openapi-visualizer:details-collapsed", String(collapsed));
+    } catch {
+        // Details panel visibility is a local preference; the app should remain usable without storage.
+    }
+}
+
+function setDetailsPanelCollapsed(collapsed, persist = true) {
+    state.detailsCollapsed = collapsed;
+    document.body.classList.toggle("details-collapsed", collapsed);
+    els.appShell?.classList.toggle("details-collapsed", collapsed);
+    els.detailsPanel?.classList.toggle("collapsed", collapsed);
+    els.rightResizeHandle?.classList.toggle("collapsed", collapsed);
+    els.detailsExpandButton?.classList.toggle("hidden", !collapsed);
+    els.detailsExpandButton?.setAttribute("aria-expanded", String(!collapsed));
+    els.detailsCollapseButton?.setAttribute("aria-expanded", String(!collapsed));
+
+    if (persist) {
+        saveDetailsCollapsed(collapsed);
+    }
+
+    window.requestAnimationFrame(() => {
+        state.cy?.resize();
+        state.cy?.fit(undefined, 40);
+    });
+}
+
 function setPanelWidth(panel, width) {
     document.documentElement.style.setProperty(`--${panel}-panel-width`, `${clampPanelWidth(width)}px`);
 }
@@ -163,6 +238,10 @@ function clampPanelWidth(width, fallback = panelWidthDefaults.left) {
 function startPanelResize(event) {
     const panel = event.currentTarget.dataset.resizePanel;
     if (!panel) {
+        return;
+    }
+
+    if (panel === "right" && state.detailsCollapsed) {
         return;
     }
 
@@ -217,6 +296,20 @@ function saveFavoriteEndpoints() {
     }
 }
 
+function setMethodFiltersCollapsed(collapsed) {
+    els.methodFilters.classList.toggle("collapsed", collapsed);
+    els.methodFiltersToggle.classList.toggle("collapsed", collapsed);
+    els.methodFiltersToggle.setAttribute("aria-expanded", String(!collapsed));
+    els.methodFiltersToggle.setAttribute("aria-label", collapsed ? "Show method filters" : "Hide method filters");
+    els.methodFiltersToggle.title = collapsed ? "Show method filters" : "Hide method filters";
+
+    const icon = els.methodFiltersToggle.querySelector("i, svg");
+    if (icon) {
+        icon.setAttribute("data-lucide", collapsed ? "chevron-down" : "chevron-up");
+    }
+    refreshIcons();
+}
+
 function refreshIcons() {
     if (window.lucide) {
         window.lucide.createIcons();
@@ -254,12 +347,32 @@ function updateGraphGaps() {
     runLayout();
 }
 
+function updateGraphSizing() {
+    syncGraphSizingLabels();
+    if (state.lastGraph) {
+        renderGraph(state.lastGraph);
+    }
+}
+
+function syncGraphSizingLabels() {
+    els.nodeWidthValue.textContent = Number.parseFloat(els.nodeWidthInput.value).toFixed(1);
+    els.nodeHeightValue.textContent = Number.parseFloat(els.nodeHeightInput.value).toFixed(1);
+    els.nodeTextSizeValue.textContent = Number.parseFloat(els.nodeTextSizeInput.value).toFixed(1);
+    els.edgeTextSizeValue.textContent = Number.parseFloat(els.edgeTextSizeInput.value).toFixed(1);
+}
+
 function resetGraphSettings() {
     els.hideEnumsInput.checked = graphSettingDefaults.hideEnums;
     els.hideErrorResponsesInput.checked = graphSettingDefaults.hideErrorResponses;
     els.horizontalGapInput.value = String(graphSettingDefaults.horizontalGap);
     els.verticalGapInput.value = String(graphSettingDefaults.verticalGap);
-    updateGraphGaps();
+    els.nodeWidthInput.value = String(graphSettingDefaults.nodeWidth);
+    els.nodeHeightInput.value = String(graphSettingDefaults.nodeHeight);
+    els.nodeTextSizeInput.value = String(graphSettingDefaults.nodeTextSize);
+    els.edgeTextSizeInput.value = String(graphSettingDefaults.edgeTextSize);
+    syncGraphSizingLabels();
+    els.horizontalGapValue.textContent = graphSettingDefaults.horizontalGap.toFixed(1);
+    els.verticalGapValue.textContent = graphSettingDefaults.verticalGap.toFixed(1);
     updateGraph();
 }
 
@@ -448,18 +561,19 @@ function initializeGraph() {
                 selector: "node",
                 style: {
                     "label": "data(label)",
-                    "font-size": 11,
+                    "font-size": "data(fontSize)",
                     "font-family": "Segoe UI, system-ui, sans-serif",
                     "text-wrap": "wrap",
-                    "text-max-width": 136,
+                    "text-max-width": "data(textMaxWidth)",
                     "text-valign": "center",
                     "text-halign": "center",
-                    "color": "#112D4E",
-                    "background-color": "#DBE2EF",
-                    "border-width": 2,
-                    "border-color": "#3F72AF",
-                    "width": 148,
-                    "height": 58,
+                    "color": "#23362b",
+                    "font-weight": "bold",
+                    "background-color": "#9bc7c5",
+                    "border-width": 1,
+                    "border-color": "#1bb28c",
+                    "width": "data(width)",
+                    "height": "data(height)",
                     "shape": "round-rectangle",
                     "overlay-padding": 6
                 }
@@ -468,14 +582,13 @@ function initializeGraph() {
                 selector: "node[kind = 'endpoint']",
                 style: {
                     "shape": "round-rectangle",
-                    "width": 178,
-                    "height": 54,
-                    "text-max-width": 158,
-                    "background-color": "#3F72AF",
-                    "border-color": "#112D4E",
-                    "color": "#F9F7F7",
-                    "font-size": 10,
-                    "font-weight": 800,
+                    "label": "",
+                    "background-color": "#efeeea",
+                    "background-image": "data(cardImage)",
+                    "background-fit": "cover",
+                    "background-clip": "none",
+                    "border-width": 0,
+                    "color": "#23362b",
                     "text-outline-width": 0
                 }
             },
@@ -483,23 +596,21 @@ function initializeGraph() {
                 selector: ".enum-node",
                 style: {
                     "shape": "round-rectangle",
-                    "background-color": "#F9F7F7",
-                    "border-color": "#3F72AF",
-                    "width": 136,
-                    "height": 54
+                    "background-color": "#efeeea",
+                    "border-color": "#1bb28c"
                 }
             },
-            { selector: "node[method = 'GET']", style: { "background-color": "#3F72AF", "border-color": "#112D4E", "border-width": 3 } },
-            { selector: "node[method = 'POST']", style: { "background-color": "#112D4E", "border-color": "#0B1F36", "border-width": 3 } },
-            { selector: "node[method = 'PUT']", style: { "background-color": "#2E5F9E", "border-color": "#112D4E", "border-width": 3 } },
-            { selector: "node[method = 'PATCH']", style: { "background-color": "#6F91C2", "border-color": "#3F72AF", "border-width": 3, "color": "#112D4E" } },
-            { selector: "node[method = 'DELETE']", style: { "background-color": "#9B4057", "border-color": "#112D4E", "border-width": 3 } },
+            { selector: "node[method = 'GET']", style: { "background-color": "#ebf4ff" } },
+            { selector: "node[method = 'POST']", style: { "background-color": "#e8f7f0" } },
+            { selector: "node[method = 'PUT']", style: { "background-color": "#fff5e6" } },
+            { selector: "node[method = 'PATCH']", style: { "background-color": "#e7fbf7" } },
+            { selector: "node[method = 'DELETE']", style: { "background-color": "#fff0f0" } },
             {
                 selector: "node[cycleId]",
                 style: {
-                    "border-color": "#112D4E",
+                    "border-color": "#23362b",
                     "border-style": "solid",
-                    "border-width": 4
+                    "border-width": 2
                 }
             },
             {
@@ -507,15 +618,15 @@ function initializeGraph() {
                 style: {
                     "curve-style": "bezier",
                     "target-arrow-shape": "triangle",
-                    "target-arrow-color": "#3F72AF",
-                    "line-color": "#3F72AF",
+                    "target-arrow-color": "#1bb28c",
+                    "line-color": "#1bb28c",
                     "width": 2,
                     "label": "data(label)",
-                    "font-size": 13,
-                    "font-weight": 750,
+                    "font-size": "data(edgeFontSize)",
+                    "font-weight": "bold",
                     "font-family": "Segoe UI, system-ui, sans-serif",
-                    "color": "#112D4E",
-                    "text-background-color": "#F9F7F7",
+                    "color": "#23362b",
+                    "text-background-color": "#efeeea",
                     "text-background-opacity": 1,
                     "text-background-padding": 4,
                     "text-rotation": "autorotate",
@@ -523,22 +634,22 @@ function initializeGraph() {
                     "overlay-padding": 4
                 }
             },
-            { selector: "edge[kind = 'Property']", style: { "line-color": "#6D86A7", "target-arrow-color": "#6D86A7" } },
-            { selector: "edge[kind = 'ArrayItem']", style: { "line-color": "#112D4E", "target-arrow-color": "#112D4E" } },
-            { selector: "edge[kind = 'Inheritance']", style: { "line-color": "#112D4E", "target-arrow-color": "#112D4E", "width": 3 } },
-            { selector: "edge[kind = 'AllOf']", style: { "line-color": "#3F72AF", "target-arrow-color": "#3F72AF", "line-style": "dashed" } },
-            { selector: "edge[kind = 'OneOf']", style: { "line-color": "#112D4E", "target-arrow-color": "#112D4E", "line-style": "dotted" } },
-            { selector: "edge[kind = 'AnyOf']", style: { "line-color": "#6F91C2", "target-arrow-color": "#6F91C2", "line-style": "dotted" } },
-            { selector: "edge[kind = 'ResponseBody']", style: { "line-color": "#3F72AF", "target-arrow-color": "#3F72AF", "width": 2.6 } },
-            { selector: "edge[kind = 'RequestBody']", style: { "line-color": "#112D4E", "target-arrow-color": "#112D4E", "width": 2.6 } },
-            { selector: "edge[kind = 'Parameter']", style: { "line-color": "#6D86A7", "target-arrow-color": "#6D86A7" } },
+            { selector: "edge[kind = 'Property']", style: { "line-color": "#6da6a3", "target-arrow-color": "#6da6a3" } },
+            { selector: "edge[kind = 'ArrayItem']", style: { "line-color": "#23362b", "target-arrow-color": "#23362b" } },
+            { selector: "edge[kind = 'Inheritance']", style: { "line-color": "#e86a58", "target-arrow-color": "#e86a58", "width": 4, "font-size": "data(inheritanceFontSize)", "font-weight": "bold" } },
+            { selector: "edge[kind = 'AllOf']", style: { "line-color": "#1bb28c", "target-arrow-color": "#1bb28c", "line-style": "dashed" } },
+            { selector: "edge[kind = 'OneOf']", style: { "line-color": "#23362b", "target-arrow-color": "#23362b", "line-style": "dotted" } },
+            { selector: "edge[kind = 'AnyOf']", style: { "line-color": "#fed45b", "target-arrow-color": "#fed45b", "line-style": "dotted" } },
+            { selector: "edge[kind = 'ResponseBody']", style: { "line-color": "#61affe", "target-arrow-color": "#61affe", "width": 2.6 } },
+            { selector: "edge[kind = 'RequestBody']", style: { "line-color": "#49cc90", "target-arrow-color": "#49cc90", "width": 2.6 } },
+            { selector: "edge[kind = 'Parameter']", style: { "line-color": "#50e3c2", "target-arrow-color": "#50e3c2" } },
             {
                 selector: ":selected",
                 style: {
-                    "border-color": "#111827",
-                    "border-width": 4,
-                    "line-color": "#111827",
-                    "target-arrow-color": "#111827"
+                    "border-color": "#23362b",
+                    "border-width": 3,
+                    "line-color": "#23362b",
+                    "target-arrow-color": "#23362b"
                 }
             }
         ]
@@ -588,25 +699,36 @@ async function updateGraph() {
 
 function renderGraph(graph) {
     els.emptyGraph.classList.toggle("hidden", graph.nodes.length > 0);
+    const edgeTextSize = graphSettingScale(els.edgeTextSizeInput, graphSettingDefaults.edgeTextSize);
+    const edgeFontSize = Math.round(13 * edgeTextSize * 10) / 10;
+    const inheritanceFontSize = Math.round(15 * edgeTextSize * 10) / 10;
 
     const elements = [
-        ...graph.nodes.map(node => ({
-            group: "nodes",
-            classes: node.enumValues?.length ? "enum-node" : "",
-            data: {
-                id: node.id,
-                kind: node.kind,
-                label: node.kind === "endpoint" ? endpointNodeLabel(node) : node.label,
-                rawLabel: node.label,
-                subtitle: node.subtitle,
-                method: node.method,
-                cycleId: node.cycleId,
-                properties: node.properties || [],
-                enumValues: node.enumValues || [],
-                enumCount: node.enumValues?.length || 0,
-                tags: node.tags || []
-            }
-        })),
+        ...graph.nodes.map(node => {
+            const metrics = nodeMetrics(node);
+            return {
+                group: "nodes",
+                classes: node.enumValues?.length ? "enum-node" : "",
+                data: {
+                    id: node.id,
+                    kind: node.kind,
+                    label: metrics.label,
+                    rawLabel: node.label,
+                    subtitle: node.subtitle,
+                    method: node.method,
+                    cycleId: node.cycleId,
+                    properties: node.properties || [],
+                    enumValues: node.enumValues || [],
+                    enumCount: node.enumValues?.length || 0,
+                    width: metrics.width,
+                    height: metrics.height,
+                    textMaxWidth: metrics.textMaxWidth,
+                    fontSize: metrics.fontSize,
+                    cardImage: metrics.cardImage || "",
+                    tags: node.tags || []
+                }
+            };
+        }),
         ...graph.edges.map(edge => ({
             group: "edges",
             data: {
@@ -615,7 +737,9 @@ function renderGraph(graph) {
                 target: edge.target,
                 kind: edge.kind,
                 label: shortEdgeLabel(edge.label),
-                fullLabel: edge.label
+                fullLabel: edge.label,
+                edgeFontSize,
+                inheritanceFontSize
             }
         }))
     ];
@@ -628,8 +752,185 @@ function renderGraph(graph) {
     setStatus(`${graph.nodes.length} nodes - ${graph.edges.length} edges - ${graph.cycles.length} cycles${warning}`);
 }
 
-function endpointNodeLabel(node) {
-    return `${node.method || "HTTP"} ${node.label}`;
+function nodeMetrics(node) {
+    const widthScale = graphSettingScale(els.nodeWidthInput, graphSettingDefaults.nodeWidth);
+    const heightScale = graphSettingScale(els.nodeHeightInput, graphSettingDefaults.nodeHeight);
+    const textScale = graphSettingScale(els.nodeTextSizeInput, graphSettingDefaults.nodeTextSize);
+    const isEndpoint = node.kind === "endpoint";
+    if (isEndpoint) {
+        return endpointNodeMetrics(node, widthScale, heightScale, textScale);
+    }
+
+    const isEnum = node.enumValues?.length > 0;
+    const baseWidth = isEnum ? 136 : 148;
+    const baseHeight = isEnum ? 54 : 58;
+    const baseFontSize = 11;
+    const width = Math.round(baseWidth * widthScale);
+    const height = Math.round(baseHeight * heightScale);
+    const textMaxWidth = Math.max(72, width - 18);
+    const label = fittedNodeLabel(node, textMaxWidth);
+    const lines = label.split("\n");
+    const longestLine = Math.max(...lines.map(line => line.length), 1);
+    const fontByWidth = textMaxWidth / (longestLine * 0.56);
+    const fontByHeight = (height - 10) / (lines.length * 1.22);
+    const fontSize = Math.max(7, Math.min(baseFontSize * textScale, fontByWidth, fontByHeight));
+
+    return {
+        width,
+        height,
+        textMaxWidth,
+        fontSize: Math.round(fontSize * 10) / 10,
+        label,
+        cardImage: ""
+    };
+}
+
+function fittedNodeLabel(node, textMaxWidth) {
+    return wrapNodeLabel(node.label, Math.max(10, Math.floor(textMaxWidth / 6.4)), 3);
+}
+
+function endpointNodeMetrics(node, widthScale, heightScale, textScale) {
+    const method = (node.method || "HTTP").toUpperCase();
+    const padding = endpointCardPadding(heightScale);
+    const methodFont = endpointMethodFontSize(textScale);
+    const pathFont = endpointPathFontSize(textScale);
+    const methodWidth = endpointMethodWidth(method, methodFont, widthScale);
+    const pathGap = Math.round(14 * widthScale);
+    const pathWidth = Math.ceil(measureTextWidth(node.label, endpointPathFont(pathFont)));
+    const width = Math.max(
+        Math.round(360 * widthScale),
+        Math.ceil(padding + methodWidth + pathGap + pathWidth + padding + 12)
+    );
+    const height = Math.round(58 * heightScale);
+
+    return {
+        width,
+        height,
+        textMaxWidth: Math.max(72, width - 18),
+        fontSize: Math.round(pathFont * 10) / 10,
+        label: "",
+        cardImage: endpointCardImage(node, width, height, widthScale, heightScale, textScale)
+    };
+}
+
+function endpointCardImage(node, width, height, widthScale, heightScale, textScale) {
+    const method = (node.method || "HTTP").toUpperCase();
+    const colors = methodColors(method);
+    const radius = 6;
+    const padding = endpointCardPadding(heightScale);
+    const methodFont = endpointMethodFontSize(textScale);
+    const pathFont = endpointPathFontSize(textScale);
+    const methodWidth = endpointMethodWidth(method, methodFont, widthScale);
+    const pathX = padding + methodWidth + Math.round(14 * widthScale);
+    const methodY = Math.round(height / 2 + methodFont / 3 - 1);
+    const pathY = Math.round(height / 2 + pathFont / 3 - 1);
+
+    const svg = `
+        <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+            <rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="${radius}" fill="${colors.tint}" stroke="${colors.primary}" stroke-width="1"/>
+            <rect x="${padding}" y="${padding}" width="${methodWidth}" height="${height - padding * 2}" rx="4" fill="${colors.primary}"/>
+            <text x="${padding + methodWidth / 2}" y="${methodY}" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="${methodFont}" font-weight="900" fill="${colors.methodText}">${escapeXml(method)}</text>
+            <text x="${pathX}" y="${pathY}" font-family="Segoe UI, Arial, sans-serif" font-size="${pathFont}" font-weight="900" fill="#23362b">${escapeXml(node.label)}</text>
+        </svg>
+    `.replace(/\s+/g, " ").trim();
+
+    return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+function endpointCardPadding(size) {
+    return Math.max(5, Math.round(6 * size));
+}
+
+function endpointMethodFontSize(size) {
+    return Math.max(10, Math.min(15, 12 * size));
+}
+
+function endpointPathFontSize(size) {
+    return Math.max(11, Math.min(16, 13 * size));
+}
+
+function endpointMethodWidth(method, fontSize, size) {
+    return Math.ceil(Math.max(74 * size, measureTextWidth(method, endpointMethodFont(fontSize)) + 24 * size));
+}
+
+function graphSettingScale(input, fallback) {
+    return Number.parseFloat(input.value) || fallback;
+}
+
+function endpointMethodFont(fontSize) {
+    return `900 ${fontSize}px Segoe UI, Arial, sans-serif`;
+}
+
+function endpointPathFont(fontSize) {
+    return `900 ${fontSize}px Segoe UI, Arial, sans-serif`;
+}
+
+function measureTextWidth(value, font) {
+    if (!measureTextWidth.canvas && typeof document !== "undefined") {
+        measureTextWidth.canvas = document.createElement("canvas");
+    }
+
+    if (measureTextWidth.canvas) {
+        const context = measureTextWidth.canvas.getContext("2d");
+        context.font = font;
+        return context.measureText(String(value || "")).width;
+    }
+
+    const fontSize = Number.parseFloat(font.match(/(\d+(?:\.\d+)?)px/)?.[1] || "13");
+    return String(value || "").length * fontSize * 0.6;
+}
+
+function methodColors(method) {
+    const colors = {
+        GET: { primary: "#61affe", tint: "#eff7ff", methodText: "#ffffff" },
+        POST: { primary: "#49cc90", tint: "#ecfaf4", methodText: "#ffffff" },
+        PUT: { primary: "#fca130", tint: "#fff5e6", methodText: "#ffffff" },
+        PATCH: { primary: "#50e3c2", tint: "#e7fbf7", methodText: "#23362b" },
+        DELETE: { primary: "#f93e3e", tint: "#fff0f0", methodText: "#ffffff" }
+    };
+
+    return colors[method] || { primary: "#9bc7c5", tint: "#efeeea", methodText: "#23362b" };
+}
+
+function wrapNodeLabel(value, maxChars, maxLines) {
+    const words = String(value || "")
+        .split(/([\s/_-]+)/)
+        .filter(Boolean);
+    const lines = [];
+    let current = "";
+
+    for (const word of words) {
+        const candidate = `${current}${word}`;
+        if (candidate.trim().length <= maxChars) {
+            current = candidate;
+            continue;
+        }
+
+        if (current.trim()) {
+            lines.push(current.trim());
+        }
+
+        if (word.trim().length > maxChars) {
+            for (let i = 0; i < word.length; i += maxChars) {
+                lines.push(word.slice(i, i + maxChars));
+            }
+            current = "";
+        } else {
+            current = word;
+        }
+    }
+
+    if (current.trim()) {
+        lines.push(current.trim());
+    }
+
+    if (lines.length <= maxLines) {
+        return lines.join("\n");
+    }
+
+    const visible = lines.slice(0, maxLines);
+    visible[maxLines - 1] = `${visible[maxLines - 1].slice(0, Math.max(1, maxChars - 3))}...`;
+    return visible.join("\n");
 }
 
 function runLayout() {
@@ -638,23 +939,117 @@ function runLayout() {
     }
 
     const roots = state.cy.nodes("[kind = 'endpoint']");
-    const horizontalGap = Number.parseFloat(els.horizontalGapInput.value) || 1.2;
-    const verticalGap = Number.parseFloat(els.verticalGapInput.value) || 1.2;
-    state.cy.layout({
+    const horizontalGap = Number.parseFloat(els.horizontalGapInput.value) || graphSettingDefaults.horizontalGap;
+    const verticalGap = Number.parseFloat(els.verticalGapInput.value) || graphSettingDefaults.verticalGap;
+    const layout = state.cy.layout({
         name: "breadthfirst",
         directed: true,
         roots,
         spacingFactor: 1,
         avoidOverlap: true,
-        animate: true,
-        animationDuration: 220,
-        fit: true,
-        padding: 34,
-        transform: (_node, position) => ({
-            x: position.y * horizontalGap,
-            y: position.x * verticalGap
-        })
-    }).run();
+        animate: false,
+        fit: false,
+        padding: 34
+    });
+
+    layout.one("layoutstop", () => {
+        applyLeftToRightLayout(roots, horizontalGap, verticalGap);
+        state.cy.fit(undefined, 40);
+    });
+    layout.run();
+}
+
+function applyLeftToRightLayout(roots, horizontalGap, verticalGap) {
+    const depths = graphDepthsFromRoots(roots);
+    const groups = new Map();
+    let maxDepth = 0;
+
+    state.cy.nodes().forEach(node => {
+        const depth = depths.get(node.id()) ?? 0;
+        maxDepth = Math.max(maxDepth, depth);
+        if (!groups.has(depth)) {
+            groups.set(depth, []);
+        }
+        groups.get(depth).push(node);
+    });
+
+    let columnLeft = 0;
+    const columnGap = 170 * horizontalGap;
+    for (let depth = 0; depth <= maxDepth; depth++) {
+        const nodes = groups.get(depth) || [];
+        if (nodes.length === 0) {
+            continue;
+        }
+
+        const columnWidth = Math.max(...nodes.map(node => Number(node.data("width")) || node.width()));
+        const yPositions = packedColumnYPositions(nodes, verticalGap);
+        for (const node of nodes) {
+            node.position({
+                x: columnLeft + (Number(node.data("width")) || node.width()) / 2,
+                y: yPositions.get(node.id()) ?? 0
+            });
+        }
+
+        columnLeft += columnWidth + columnGap;
+    }
+}
+
+function graphDepthsFromRoots(roots) {
+    const depths = new Map();
+    const queue = [];
+
+    roots.forEach(root => {
+        depths.set(root.id(), 0);
+        queue.push(root);
+    });
+
+    for (let index = 0; index < queue.length; index++) {
+        const node = queue[index];
+        const currentDepth = depths.get(node.id()) ?? 0;
+        node.outgoers("edge").forEach(edge => {
+            const target = edge.target();
+            const nextDepth = currentDepth + 1;
+            const knownDepth = depths.get(target.id());
+            if (knownDepth === undefined || nextDepth < knownDepth) {
+                depths.set(target.id(), nextDepth);
+                queue.push(target);
+            }
+        });
+    }
+
+    const fallbackDepth = depths.size === 0 ? 0 : Math.max(...depths.values()) + 1;
+    state.cy.nodes().forEach(node => {
+        if (!depths.has(node.id())) {
+            depths.set(node.id(), fallbackDepth);
+        }
+    });
+
+    return depths;
+}
+
+function packedColumnYPositions(nodes, verticalGap) {
+    const ordered = [...nodes].sort((a, b) => {
+        const positionDelta = a.position("x") - b.position("x");
+        if (Math.abs(positionDelta) > 1) {
+            return positionDelta;
+        }
+
+        return String(a.data("rawLabel") || a.data("label") || "").localeCompare(String(b.data("rawLabel") || b.data("label") || ""));
+    });
+
+    const rowGap = 58 * verticalGap;
+    const totalHeight = ordered.reduce((sum, node) => sum + (Number(node.data("height")) || node.height()), 0) +
+        Math.max(0, ordered.length - 1) * rowGap;
+    let top = -totalHeight / 2;
+    const yPositions = new Map();
+
+    for (const node of ordered) {
+        const height = Number(node.data("height")) || node.height();
+        yPositions.set(node.id(), top + height / 2);
+        top += height + rowGap;
+    }
+
+    return yPositions;
 }
 
 function renderDetails(data) {
@@ -670,7 +1065,7 @@ function renderDetails(data) {
         return;
     }
 
-    els.detailsTitle.textContent = data.label;
+    els.detailsTitle.textContent = data.rawLabel || data.label;
     els.detailsBadge.textContent = data.method || data.kind;
     els.detailsBody.innerHTML = renderNodeSummary(data, false);
 }
@@ -857,4 +1252,13 @@ function escapeHtml(value) {
         .replaceAll(">", "&gt;")
         .replaceAll('"', "&quot;")
         .replaceAll("'", "&#039;");
+}
+
+function escapeXml(value) {
+    return String(value ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&apos;");
 }

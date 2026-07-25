@@ -28,11 +28,16 @@
             </section>
 
             <section class="search-panel">
-                <div class="search-box">
-                    <i data-lucide="search"></i>
-                    <input id="endpointSearch" type="search" placeholder="Search endpoints" autocomplete="off">
+                <div class="search-row">
+                    <div class="search-box">
+                        <i data-lucide="search"></i>
+                        <input id="endpointSearch" type="search" placeholder="Search endpoints" autocomplete="off">
+                    </div>
+                    <button id="methodFiltersToggle" class="icon-button filter-toggle collapsed" title="Show method filters" aria-label="Show method filters" aria-expanded="false">
+                        <i data-lucide="chevron-down"></i>
+                    </button>
                 </div>
-                <div class="method-row" id="methodFilters">
+                <div class="method-row collapsed" id="methodFilters">
                     <button class="method-filter active" data-method="">All</button>
                     <button class="method-filter get" data-method="GET">GET</button>
                     <button class="method-filter post" data-method="POST">POST</button>
@@ -121,12 +126,28 @@
                             <span>Hide error responses</span>
                         </label>
                         <label class="range-control">
-                            <span>Horizontal gap <strong id="horizontalGapValue">1.2</strong></span>
-                            <input id="horizontalGapInput" type="range" min="0.8" max="2.2" step="0.1" value="1.2">
+                            <span>Horizontal gap <strong id="horizontalGapValue">1.4</strong></span>
+                            <input id="horizontalGapInput" type="range" min="0.8" max="2.8" step="0.1" value="1.4">
                         </label>
                         <label class="range-control">
-                            <span>Vertical gap <strong id="verticalGapValue">1.2</strong></span>
-                            <input id="verticalGapInput" type="range" min="0.8" max="2.2" step="0.1" value="1.2">
+                            <span>Vertical gap <strong id="verticalGapValue">1.4</strong></span>
+                            <input id="verticalGapInput" type="range" min="0.8" max="2.8" step="0.1" value="1.4">
+                        </label>
+                        <label class="range-control">
+                            <span>Node width <strong id="nodeWidthValue">1.0</strong></span>
+                            <input id="nodeWidthInput" type="range" min="0.8" max="2.4" step="0.1" value="1">
+                        </label>
+                        <label class="range-control">
+                            <span>Node height <strong id="nodeHeightValue">1.0</strong></span>
+                            <input id="nodeHeightInput" type="range" min="0.8" max="2.0" step="0.1" value="1">
+                        </label>
+                        <label class="range-control">
+                            <span>Node text <strong id="nodeTextSizeValue">1.0</strong></span>
+                            <input id="nodeTextSizeInput" type="range" min="0.8" max="1.8" step="0.1" value="1">
+                        </label>
+                        <label class="range-control">
+                            <span>Edge text <strong id="edgeTextSizeValue">1.0</strong></span>
+                            <input id="edgeTextSizeInput" type="range" min="0.8" max="2.0" step="0.1" value="1">
                         </label>
                         <button id="resetSettingsButton" class="settings-reset" type="button">Reset to defaults</button>
                     </div>
@@ -134,14 +155,22 @@
             </div>
             <div id="graph"></div>
             <div id="emptyGraph" class="empty-state">Select endpoints</div>
+            <button id="detailsExpandButton" class="details-expand-button hidden" type="button" title="Show details" aria-label="Show details">
+                <i data-lucide="chevron-left"></i>
+            </button>
         </section>
 
         <div class="resize-handle resize-handle-right" data-resize-panel="right" role="separator" aria-orientation="vertical" aria-label="Resize right panel"></div>
 
         <aside class="details-panel">
             <div class="details-header">
-                <h2 id="detailsTitle">Details</h2>
-                <span id="detailsBadge"></span>
+                <div class="details-title-group">
+                    <h2 id="detailsTitle">Details</h2>
+                    <span id="detailsBadge"></span>
+                </div>
+                <button id="detailsCollapseButton" class="icon-button" type="button" title="Collapse details" aria-label="Collapse details">
+                    <i data-lucide="chevron-right"></i>
+                </button>
             </div>
             <div id="detailsBody" class="details-body"></div>
         </aside>
