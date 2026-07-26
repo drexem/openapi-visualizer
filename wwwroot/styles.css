@@ -429,10 +429,6 @@ body.resizing-panels {
     background: #efeeea;
 }
 
-.endpoint-row.selected {
-    background: #dbeafe;
-}
-
 .endpoint-row.diff-added,
 .selected-item.diff-added {
     background: #d1fae5;
@@ -446,6 +442,23 @@ body.resizing-panels {
 .endpoint-row.diff-modified,
 .selected-item.diff-modified {
     background: #fef3c7;
+}
+
+.endpoint-row.selected {
+    background: #dbeafe;
+    box-shadow: inset 5px 0 0 #1d4ed8, inset 0 0 0 1.5px #1d4ed8;
+}
+
+.endpoint-row.selected.diff-added {
+    background: linear-gradient(90deg, #dbeafe 0, #dbeafe 42px, #d1fae5 42px);
+}
+
+.endpoint-row.selected.diff-deleted {
+    background: linear-gradient(90deg, #dbeafe 0, #dbeafe 42px, #fee2e2 42px);
+}
+
+.endpoint-row.selected.diff-modified {
+    background: linear-gradient(90deg, #dbeafe 0, #dbeafe 42px, #fef3c7 42px);
 }
 
 .method-badge {
@@ -487,6 +500,14 @@ body.resizing-panels {
     line-height: 16px;
     text-overflow: ellipsis;
     white-space: nowrap;
+}
+
+.endpoint-row-state {
+    display: inline-flex;
+    align-items: flex-start;
+    justify-content: flex-end;
+    gap: 6px;
+    min-width: 0;
 }
 
 .selected-section {
@@ -986,7 +1007,10 @@ body.resizing-panels {
 }
 
 .required-dot {
-    color: #7c3aed;
+    color: #d12b2b;
+    font-size: 15px;
+    font-weight: 950;
+    line-height: 1;
 }
 
 .details-header {
@@ -1089,6 +1113,54 @@ body.resizing-panels {
 .diff-entry-list {
     display: grid;
     gap: 6px;
+}
+
+.diff-block-toggle {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    margin-bottom: 8px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+}
+
+.diff-block-toggle .detail-label {
+    margin-bottom: 0;
+}
+
+.diff-block-toggle svg {
+    width: 15px;
+    height: 15px;
+    transition: transform 140ms ease;
+}
+
+.diff-block.collapsed .diff-block-toggle svg {
+    transform: rotate(-90deg);
+}
+
+.diff-block.collapsed .diff-entry-list {
+    display: none;
+}
+
+.diff-block-meta {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    min-height: 20px;
+    padding: 2px 7px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: #f8fafc;
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 850;
+    line-height: 14px;
 }
 
 .diff-entry {

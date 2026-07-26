@@ -27,7 +27,7 @@ const state = {
     selected: new Map(),
     favorites: readFavoriteEndpoints(),
     detailsCollapsed: readDetailsCollapsed(),
-    collapsedSections: new Set(),
+    collapsedSections: new Set(["endpoints", "changed", "selected"]),
     method: "",
     cy: null,
     lastGraph: null,
@@ -164,6 +164,16 @@ function wireEvents() {
         setDetailsPanelCollapsed(false);
     });
     els.detailsBody?.addEventListener("click", event => {
+        const diffToggle = event.target.closest("[data-toggle-diff-block]");
+        if (diffToggle) {
+            event.preventDefault();
+            const block = diffToggle.closest(".diff-block");
+            const collapsed = block?.classList.toggle("collapsed") ?? false;
+            diffToggle.setAttribute("aria-expanded", String(!collapsed));
+            refreshIcons();
+            return;
+        }
+
         const button = event.target.closest("[data-open-schema-explorer]");
         if (!button || !state.currentDetailsNode) {
             return;
@@ -649,8 +659,9 @@ function renderChangedEndpoints() {
 }
 
 function createEndpointRow(endpoint) {
+    const selected = state.selected.has(endpoint.id);
     const row = document.createElement("div");
-    row.className = `endpoint-row ${state.selected.has(endpoint.id) ? "selected" : ""} ${diffClass(endpoint.diffState)}`;
+    row.className = `endpoint-row ${selected ? "selected" : ""} ${diffClass(endpoint.diffState)}`;
 
     const favoriteButton = document.createElement("button");
     favoriteButton.className = `favorite-button ${state.favorites.has(endpoint.id) ? "active" : ""}`;
@@ -663,13 +674,16 @@ function createEndpointRow(endpoint) {
     const button = document.createElement("button");
     button.className = "endpoint-item";
     button.type = "button";
+    button.setAttribute("aria-pressed", String(selected));
     button.innerHTML = `
         <span class="method-badge ${escapeHtml(endpoint.method)}">${escapeHtml(endpoint.method)}</span>
         <span class="endpoint-main">
             <span class="endpoint-path">${escapeHtml(endpoint.path)}</span>
             <span class="endpoint-summary">${escapeHtml(endpoint.summary || endpoint.operationId || endpoint.tags?.[0] || "")}</span>
         </span>
-        ${renderDiffBadge(endpoint.diffState)}
+        <span class="endpoint-row-state">
+            ${renderDiffBadge(endpoint.diffState)}
+        </span>
     `;
     button.addEventListener("click", () => toggleEndpoint(endpoint));
     row.append(favoriteButton, button);
@@ -1672,8 +1686,12 @@ function renderDiffEntries(data) {
         `).join("");
 
     return `
-        <div class="detail-block diff-block">
-            <div class="detail-label">Diff</div>
+        <div class="detail-block diff-block collapsed">
+            <button class="diff-block-toggle" type="button" data-toggle-diff-block aria-expanded="false">
+                <span class="detail-label">Diff</span>
+                <span class="diff-block-meta">${entries.length || 1}</span>
+                <i data-lucide="chevron-down"></i>
+            </button>
             <div class="diff-entry-list">${rows}</div>
         </div>
     `;
