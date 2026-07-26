@@ -20,6 +20,8 @@ public sealed class EndpointInfo
     public string? OperationId { get; init; }
     public IReadOnlyList<string> Tags { get; init; } = [];
     public IReadOnlyList<EndpointSchemaUse> SchemaUses { get; init; } = [];
+    public string? DiffState { get; init; }
+    public IReadOnlyList<DiffEntry> DiffEntries { get; init; } = [];
 }
 
 public sealed class EndpointSchemaUse
@@ -41,6 +43,8 @@ public sealed class SchemaInfo
     public int OutgoingReferenceCount { get; init; }
     public int IncomingReferenceCount { get; set; }
     public int? CycleId { get; set; }
+    public string? DiffState { get; init; }
+    public IReadOnlyList<DiffEntry> DiffEntries { get; init; } = [];
 }
 
 public sealed class SchemaPropertyInfo
@@ -56,6 +60,8 @@ public sealed class SchemaPropertyInfo
     public string? RefId { get; init; }
     public string? ItemsRefId { get; init; }
     public IReadOnlyList<string> EnumValues { get; init; } = [];
+    public string? DiffState { get; init; }
+    public string? PreviousType { get; init; }
 }
 
 public sealed class SchemaEdge
@@ -75,6 +81,7 @@ public sealed class CycleInfo
 public sealed class GraphRequest
 {
     public IReadOnlyList<string> EndpointIds { get; init; } = [];
+    public string? CompareSpecId { get; init; }
     public int Depth { get; init; } = 2;
     public int MaxNodes { get; init; } = 250;
     public bool IncludeProperties { get; init; } = true;
@@ -102,6 +109,8 @@ public sealed class GraphNode
     public IReadOnlyList<SchemaPropertyInfo> Properties { get; init; } = [];
     public IReadOnlyList<string> EnumValues { get; init; } = [];
     public IReadOnlyList<string> Tags { get; init; } = [];
+    public string? DiffState { get; init; }
+    public IReadOnlyList<DiffEntry> DiffEntries { get; init; } = [];
 }
 
 public sealed class GraphEdge
@@ -111,4 +120,34 @@ public sealed class GraphEdge
     public required string Target { get; init; }
     public required string Kind { get; init; }
     public required string Label { get; init; }
+    public string? DiffState { get; init; }
+}
+
+public sealed class DiffEntry
+{
+    public required string State { get; init; }
+    public required string Label { get; init; }
+    public string? Before { get; init; }
+    public string? After { get; init; }
+}
+
+public sealed class SpecDiffSummary
+{
+    public required string BaseSpecId { get; init; }
+    public required string CompareSpecId { get; init; }
+    public required SpecSummary CompareSummary { get; init; }
+    public required DiffCounts Counts { get; init; }
+    public required IReadOnlyList<EndpointInfo> ChangedEndpoints { get; init; }
+}
+
+public sealed class DiffCounts
+{
+    public required int AddedEndpoints { get; init; }
+    public required int DeletedEndpoints { get; init; }
+    public required int ModifiedEndpoints { get; init; }
+    public required int AddedSchemas { get; init; }
+    public required int DeletedSchemas { get; init; }
+    public required int ModifiedSchemas { get; init; }
+    public required int AddedEdges { get; init; }
+    public required int DeletedEdges { get; init; }
 }

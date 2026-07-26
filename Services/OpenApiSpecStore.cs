@@ -17,7 +17,17 @@ public sealed class OpenApiSpecStore
 
     public string? CurrentSpecId { get; private set; }
 
-    public async Task<SpecSummary> ImportAsync(Stream stream, string fileName, CancellationToken cancellationToken)
+    public Task<SpecSummary> ImportAsync(Stream stream, string fileName, CancellationToken cancellationToken)
+    {
+        return ImportAsync(stream, fileName, makeCurrent: true, cancellationToken);
+    }
+
+    public Task<SpecSummary> ImportComparisonAsync(Stream stream, string fileName, CancellationToken cancellationToken)
+    {
+        return ImportAsync(stream, fileName, makeCurrent: false, cancellationToken);
+    }
+
+    private async Task<SpecSummary> ImportAsync(Stream stream, string fileName, bool makeCurrent, CancellationToken cancellationToken)
     {
         using var buffer = new MemoryStream();
         await stream.CopyToAsync(buffer, cancellationToken);
@@ -26,7 +36,11 @@ public sealed class OpenApiSpecStore
 
         if (_specs.TryGetValue(specId, out var existing))
         {
-            CurrentSpecId = specId;
+            if (makeCurrent)
+            {
+                CurrentSpecId = specId;
+            }
+
             return existing.Summary;
         }
 
@@ -40,7 +54,11 @@ public sealed class OpenApiSpecStore
         using var document = JsonDocument.Parse(bytes, options);
         var index = OpenApiIndexBuilder.Build(specId, fileName, document.RootElement);
         _specs[specId] = index;
-        CurrentSpecId = specId;
+        if (makeCurrent)
+        {
+            CurrentSpecId = specId;
+        }
+
         return index.Summary;
     }
 
@@ -78,6 +96,30 @@ public sealed class OpenApiSpecStore
             : null;
     }
 
+    public SchemaInfo? GetSchema(string specId, string schemaIdOrName, string? compareSpecId)
+    {
+        if (string.IsNullOrWhiteSpace(compareSpecId))
+        {
+            return GetSchema(specId, schemaIdOrName);
+        }
+
+        if (!_specs.TryGetValue(specId, out var baseIndex) ||
+            !_specs.TryGetValue(compareSpecId, out var compareIndex))
+        {
+            return null;
+        }
+
+        return OpenApiDiffBuilder.GetSchema(baseIndex, compareIndex, schemaIdOrName);
+    }
+
+    public SpecDiffSummary? GetDiffSummary(string baseSpecId, string compareSpecId)
+    {
+        return _specs.TryGetValue(baseSpecId, out var baseIndex) &&
+               _specs.TryGetValue(compareSpecId, out var compareIndex)
+            ? OpenApiDiffBuilder.BuildSummary(baseIndex, compareIndex)
+            : null;
+    }
+
     public GraphResponse BuildGraph(string specId, GraphRequest request)
     {
         if (!_specs.TryGetValue(specId, out var index))
@@ -89,6 +131,22 @@ public sealed class OpenApiSpecStore
                 Cycles = [],
                 Warnings = [$"Spec '{specId}' is not loaded."]
             };
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.CompareSpecId))
+        {
+            if (!_specs.TryGetValue(request.CompareSpecId, out var compareIndex))
+            {
+                return new GraphResponse
+                {
+                    Nodes = [],
+                    Edges = [],
+                    Cycles = [],
+                    Warnings = [$"Comparison spec '{request.CompareSpecId}' is not loaded."]
+                };
+            }
+
+            return OpenApiDiffBuilder.BuildGraph(index, compareIndex, request);
         }
 
         return index.BuildGraph(request);
@@ -316,6 +374,606 @@ internal sealed class OpenApiIndex
         var cycleText = schema.CycleId is null ? null : $"cycle {schema.CycleId}";
         return string.Join(" - ", new[] { type, enumText, propertyText, cycleText }.Where(x => !string.IsNullOrWhiteSpace(x)));
     }
+}
+
+internal static class OpenApiDiffBuilder
+{
+    private const string Added = "added";
+    private const string Deleted = "deleted";
+    private const string Modified = "modified";
+    private const string Unchanged = "unchanged";
+
+    public static SpecDiffSummary BuildSummary(OpenApiIndex baseIndex, OpenApiIndex compareIndex)
+    {
+        var endpointDiffs = BuildEndpointDiffs(baseIndex, compareIndex);
+        var schemaDiffs = BuildSchemaDiffs(baseIndex, compareIndex);
+        var edgeDiffs = BuildEdgeDiffs(baseIndex, compareIndex);
+
+        var changedEndpoints = AllEndpointIds(baseIndex, compareIndex)
+            .Select(endpointId => EndpointState(endpointId, baseIndex, compareIndex, endpointDiffs, schemaDiffs, edgeDiffs))
+            .Where(item => item.State != Unchanged)
+            .Select(item => WithEndpointDiff(item.Endpoint, item.State, item.Entries))
+            .OrderBy(endpoint => endpoint.Path, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(endpoint => endpoint.Method, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return new SpecDiffSummary
+        {
+            BaseSpecId = baseIndex.Summary.SpecId,
+            CompareSpecId = compareIndex.Summary.SpecId,
+            CompareSummary = compareIndex.Summary,
+            Counts = new DiffCounts
+            {
+                AddedEndpoints = endpointDiffs.Count(x => x.Value.State == Added),
+                DeletedEndpoints = endpointDiffs.Count(x => x.Value.State == Deleted),
+                ModifiedEndpoints = endpointDiffs.Count(x => x.Value.State == Modified),
+                AddedSchemas = schemaDiffs.Count(x => x.Value.State == Added),
+                DeletedSchemas = schemaDiffs.Count(x => x.Value.State == Deleted),
+                ModifiedSchemas = schemaDiffs.Count(x => x.Value.State == Modified),
+                AddedEdges = edgeDiffs.Count(x => x.Value == Added),
+                DeletedEdges = edgeDiffs.Count(x => x.Value == Deleted)
+            },
+            ChangedEndpoints = changedEndpoints
+        };
+    }
+
+    public static SchemaInfo? GetSchema(OpenApiIndex baseIndex, OpenApiIndex compareIndex, string schemaIdOrName)
+    {
+        var schemaId = schemaIdOrName.StartsWith("schema:", StringComparison.Ordinal)
+            ? schemaIdOrName
+            : $"schema:{schemaIdOrName}";
+
+        var schemaDiffs = BuildSchemaDiffs(baseIndex, compareIndex);
+        if (!schemaDiffs.TryGetValue(schemaId, out var diff))
+        {
+            return null;
+        }
+
+        return WithSchemaDiff(diff.Item, diff.State, diff.Entries, baseIndex, compareIndex);
+    }
+
+    public static GraphResponse BuildGraph(OpenApiIndex baseIndex, OpenApiIndex compareIndex, GraphRequest request)
+    {
+        var baseRequest = CopyRequestFor(request, request.EndpointIds.Where(baseIndex.Endpoints.ContainsKey));
+        var compareRequest = CopyRequestFor(request, request.EndpointIds.Where(compareIndex.Endpoints.ContainsKey));
+        var baseGraph = baseIndex.BuildGraph(baseRequest);
+        var compareGraph = compareIndex.BuildGraph(compareRequest);
+        var endpointDiffs = BuildEndpointDiffs(baseIndex, compareIndex);
+        var schemaDiffs = BuildSchemaDiffs(baseIndex, compareIndex);
+        var edgeDiffs = BuildEdgeDiffs(baseIndex, compareIndex);
+        var nodes = new Dictionary<string, GraphNode>(StringComparer.Ordinal);
+        var edges = new Dictionary<string, GraphEdge>(StringComparer.Ordinal);
+
+        foreach (var nodeId in baseGraph.Nodes.Select(node => node.Id).Concat(compareGraph.Nodes.Select(node => node.Id)).Distinct(StringComparer.Ordinal))
+        {
+            var baseNode = baseGraph.Nodes.FirstOrDefault(node => string.Equals(node.Id, nodeId, StringComparison.Ordinal));
+            var compareNode = compareGraph.Nodes.FirstOrDefault(node => string.Equals(node.Id, nodeId, StringComparison.Ordinal));
+            var node = compareNode ?? baseNode;
+            if (node is null)
+            {
+                continue;
+            }
+
+            if (node.Kind == "endpoint")
+            {
+                var endpointDiff = EndpointState(nodeId, baseIndex, compareIndex, endpointDiffs, schemaDiffs, edgeDiffs);
+                nodes[nodeId] = WithGraphNodeDiff(node, endpointDiff.State, endpointDiff.Entries, baseIndex, compareIndex);
+                continue;
+            }
+
+            var schemaDiff = schemaDiffs.GetValueOrDefault(nodeId);
+            nodes[nodeId] = schemaDiff is null
+                ? WithGraphNodeDiff(node, Unchanged, [], baseIndex, compareIndex)
+                : WithGraphNodeDiff(node, schemaDiff.State, schemaDiff.Entries, baseIndex, compareIndex);
+        }
+
+        foreach (var edgeId in baseGraph.Edges.Select(edge => edge.Id).Concat(compareGraph.Edges.Select(edge => edge.Id)).Distinct(StringComparer.Ordinal))
+        {
+            var baseEdge = baseGraph.Edges.FirstOrDefault(edge => string.Equals(edge.Id, edgeId, StringComparison.Ordinal));
+            var compareEdge = compareGraph.Edges.FirstOrDefault(edge => string.Equals(edge.Id, edgeId, StringComparison.Ordinal));
+            var edge = compareEdge ?? baseEdge;
+            if (edge is null)
+            {
+                continue;
+            }
+
+            edges[edgeId] = new GraphEdge
+            {
+                Id = edge.Id,
+                Source = edge.Source,
+                Target = edge.Target,
+                Kind = edge.Kind,
+                Label = edge.Label,
+                DiffState = edgeDiffs.GetValueOrDefault(edgeId, Unchanged)
+            };
+        }
+
+        var visibleSchemaIds = nodes.Values
+            .Where(node => node.Kind == "schema")
+            .Select(node => node.Id)
+            .ToHashSet(StringComparer.Ordinal);
+        var visibleCycles = baseIndex.Cycles.Concat(compareIndex.Cycles)
+            .Where(cycle => cycle.SchemaIds.Any(visibleSchemaIds.Contains))
+            .GroupBy(cycle => string.Join("|", cycle.SchemaIds.Order(StringComparer.Ordinal)), StringComparer.Ordinal)
+            .Select(group => group.First())
+            .ToArray();
+        var warnings = baseGraph.Warnings.Concat(compareGraph.Warnings)
+            .Where(warning => !warning.Contains("Select at least one endpoint", StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+
+        return new GraphResponse
+        {
+            Nodes = nodes.Values.ToArray(),
+            Edges = edges.Values.ToArray(),
+            Cycles = visibleCycles,
+            Warnings = warnings
+        };
+    }
+
+    private static GraphRequest CopyRequestFor(GraphRequest request, IEnumerable<string> endpointIds)
+    {
+        return new GraphRequest
+        {
+            EndpointIds = endpointIds.Distinct(StringComparer.Ordinal).ToArray(),
+            Depth = request.Depth,
+            MaxNodes = request.MaxNodes,
+            IncludeProperties = request.IncludeProperties,
+            AllReachable = request.AllReachable,
+            HideEnums = request.HideEnums,
+            HideErrorResponses = request.HideErrorResponses
+        };
+    }
+
+    private static IReadOnlyList<string> AllEndpointIds(OpenApiIndex baseIndex, OpenApiIndex compareIndex)
+    {
+        return baseIndex.Endpoints.Keys
+            .Concat(compareIndex.Endpoints.Keys)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static EndpointDiffResult EndpointState(
+        string endpointId,
+        OpenApiIndex baseIndex,
+        OpenApiIndex compareIndex,
+        IReadOnlyDictionary<string, DiffResult<EndpointInfo>> endpointDiffs,
+        IReadOnlyDictionary<string, DiffResult<SchemaInfo>> schemaDiffs,
+        IReadOnlyDictionary<string, string> edgeDiffs)
+    {
+        if (endpointDiffs.TryGetValue(endpointId, out var endpointDiff) && endpointDiff.State != Unchanged)
+        {
+            return new EndpointDiffResult(endpointDiff.Item, endpointDiff.State, endpointDiff.Entries);
+        }
+
+        var endpoint = compareIndex.Endpoints.GetValueOrDefault(endpointId) ?? baseIndex.Endpoints[endpointId];
+        var baseReachable = baseIndex.Endpoints.ContainsKey(endpointId) ? ReachableSchemaIds(baseIndex, endpointId) : [];
+        var compareReachable = compareIndex.Endpoints.ContainsKey(endpointId) ? ReachableSchemaIds(compareIndex, endpointId) : [];
+        var reachable = baseReachable.Concat(compareReachable).ToHashSet(StringComparer.Ordinal);
+        var entries = new List<DiffEntry>();
+
+        foreach (var schemaId in reachable.Order(StringComparer.OrdinalIgnoreCase))
+        {
+            if (schemaDiffs.TryGetValue(schemaId, out var schemaDiff) && schemaDiff.State != Unchanged)
+            {
+                entries.Add(new DiffEntry
+                {
+                    State = schemaDiff.State,
+                    Label = "Affected model",
+                    Before = schemaDiff.State == Added ? null : StripSchemaPrefix(schemaId),
+                    After = schemaDiff.State == Deleted ? null : StripSchemaPrefix(schemaId)
+                });
+            }
+        }
+
+        var reachableEdgeIds = SchemaEdgeIds(baseIndex, baseReachable)
+            .Concat(SchemaEdgeIds(compareIndex, compareReachable))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        foreach (var edgeId in reachableEdgeIds)
+        {
+            if (edgeDiffs.TryGetValue(edgeId, out var edgeState) && edgeState != Unchanged)
+            {
+                entries.Add(new DiffEntry
+                {
+                    State = edgeState,
+                    Label = "Affected relationship",
+                    Before = edgeState == Added ? null : EdgeLabel(edgeId),
+                    After = edgeState == Deleted ? null : EdgeLabel(edgeId)
+                });
+            }
+        }
+
+        return entries.Count == 0
+            ? new EndpointDiffResult(endpoint, Unchanged, [])
+            : new EndpointDiffResult(endpoint, Modified, entries.Take(16).ToArray());
+    }
+
+    private static IReadOnlyDictionary<string, DiffResult<EndpointInfo>> BuildEndpointDiffs(OpenApiIndex baseIndex, OpenApiIndex compareIndex)
+    {
+        return AllEndpointIds(baseIndex, compareIndex)
+            .ToDictionary(
+                endpointId => endpointId,
+                endpointId =>
+                {
+                    var hasBase = baseIndex.Endpoints.TryGetValue(endpointId, out var before);
+                    var hasCompare = compareIndex.Endpoints.TryGetValue(endpointId, out var after);
+                    if (hasCompare && !hasBase)
+                    {
+                        return new DiffResult<EndpointInfo>(after!, Added, [NewEntry(Added, "Endpoint", null, endpointId)]);
+                    }
+
+                    if (hasBase && !hasCompare)
+                    {
+                        return new DiffResult<EndpointInfo>(before!, Deleted, [NewEntry(Deleted, "Endpoint", endpointId, null)]);
+                    }
+
+                    var entries = EndpointEntries(before!, after!);
+                    return new DiffResult<EndpointInfo>(after!, entries.Count == 0 ? Unchanged : Modified, entries);
+                },
+                StringComparer.Ordinal);
+    }
+
+    private static IReadOnlyList<DiffEntry> EndpointEntries(EndpointInfo before, EndpointInfo after)
+    {
+        var entries = new List<DiffEntry>();
+        AddChanged(entries, "Summary", before.Summary, after.Summary);
+        AddChanged(entries, "Operation ID", before.OperationId, after.OperationId);
+        AddSetChanges(entries, "Tag", before.Tags, after.Tags);
+        AddSetChanges(entries, "Schema use", before.SchemaUses.Select(SchemaUseSignature), after.SchemaUses.Select(SchemaUseSignature));
+        return entries;
+    }
+
+    private static IReadOnlyDictionary<string, DiffResult<SchemaInfo>> BuildSchemaDiffs(OpenApiIndex baseIndex, OpenApiIndex compareIndex)
+    {
+        return baseIndex.Schemas.Keys
+            .Concat(compareIndex.Schemas.Keys)
+            .Distinct(StringComparer.Ordinal)
+            .ToDictionary(
+                schemaId => schemaId,
+                schemaId =>
+                {
+                    var hasBase = baseIndex.Schemas.TryGetValue(schemaId, out var before);
+                    var hasCompare = compareIndex.Schemas.TryGetValue(schemaId, out var after);
+                    if (hasCompare && !hasBase)
+                    {
+                        return new DiffResult<SchemaInfo>(after!, Added, [NewEntry(Added, "Model", null, StripSchemaPrefix(schemaId))]);
+                    }
+
+                    if (hasBase && !hasCompare)
+                    {
+                        return new DiffResult<SchemaInfo>(before!, Deleted, [NewEntry(Deleted, "Model", StripSchemaPrefix(schemaId), null)]);
+                    }
+
+                    var entries = SchemaEntries(before!, after!);
+                    return new DiffResult<SchemaInfo>(after!, entries.Count == 0 ? Unchanged : Modified, entries);
+                },
+                StringComparer.Ordinal);
+    }
+
+    private static IReadOnlyList<DiffEntry> SchemaEntries(SchemaInfo before, SchemaInfo after)
+    {
+        var entries = new List<DiffEntry>();
+        AddChanged(entries, "Type", SchemaType(before), SchemaType(after));
+        AddChanged(entries, "Description", before.Description, after.Description);
+        AddSetChanges(entries, "Enum value", before.EnumValues, after.EnumValues);
+
+        var beforeProps = before.Properties.ToDictionary(prop => prop.Name, StringComparer.Ordinal);
+        var afterProps = after.Properties.ToDictionary(prop => prop.Name, StringComparer.Ordinal);
+        foreach (var propertyName in beforeProps.Keys.Concat(afterProps.Keys).Distinct(StringComparer.Ordinal).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            var hasBefore = beforeProps.TryGetValue(propertyName, out var beforeProp);
+            var hasAfter = afterProps.TryGetValue(propertyName, out var afterProp);
+            if (hasAfter && !hasBefore)
+            {
+                entries.Add(NewEntry(Added, "Property", null, $"{propertyName}: {PropertySignature(afterProp!)}"));
+            }
+            else if (hasBefore && !hasAfter)
+            {
+                entries.Add(NewEntry(Deleted, "Property", $"{propertyName}: {PropertySignature(beforeProp!)}", null));
+            }
+            else if (!string.Equals(PropertySignature(beforeProp!), PropertySignature(afterProp!), StringComparison.Ordinal))
+            {
+                entries.Add(NewEntry(Modified, $"Property {propertyName}", PropertySignature(beforeProp!), PropertySignature(afterProp!)));
+            }
+        }
+
+        return entries;
+    }
+
+    private static IReadOnlyDictionary<string, string> BuildEdgeDiffs(OpenApiIndex baseIndex, OpenApiIndex compareIndex)
+    {
+        var baseEdges = AllGraphEdgeIds(baseIndex);
+        var compareEdges = AllGraphEdgeIds(compareIndex);
+        return baseEdges.Concat(compareEdges)
+            .Distinct(StringComparer.Ordinal)
+            .ToDictionary(
+                edgeId => edgeId,
+                edgeId =>
+                {
+                    var inBase = baseEdges.Contains(edgeId);
+                    var inCompare = compareEdges.Contains(edgeId);
+                    if (inCompare && !inBase)
+                    {
+                        return Added;
+                    }
+
+                    if (inBase && !inCompare)
+                    {
+                        return Deleted;
+                    }
+
+                    return Unchanged;
+                },
+                StringComparer.Ordinal);
+    }
+
+    private static HashSet<string> AllGraphEdgeIds(OpenApiIndex index)
+    {
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var endpoint in index.Endpoints.Values)
+        {
+            foreach (var use in endpoint.SchemaUses)
+            {
+                ids.Add(GraphEdgeId(endpoint.Id, use.Kind, use.Label, use.SchemaId));
+            }
+        }
+
+        foreach (var edge in index.SchemaEdges.Values.SelectMany(x => x))
+        {
+            ids.Add(GraphEdgeId(edge.SourceSchemaId, edge.Kind, edge.Label, edge.TargetSchemaId));
+        }
+
+        return ids;
+    }
+
+    private static IReadOnlyCollection<string> ReachableSchemaIds(OpenApiIndex index, string endpointId)
+    {
+        if (!index.Endpoints.TryGetValue(endpointId, out var endpoint))
+        {
+            return [];
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var queue = new Queue<string>();
+        foreach (var schemaUse in endpoint.SchemaUses)
+        {
+            if (seen.Add(schemaUse.SchemaId))
+            {
+                queue.Enqueue(schemaUse.SchemaId);
+            }
+        }
+
+        while (queue.Count > 0)
+        {
+            var schemaId = queue.Dequeue();
+            if (!index.SchemaEdges.TryGetValue(schemaId, out var outgoing))
+            {
+                continue;
+            }
+
+            foreach (var edge in outgoing)
+            {
+                if (seen.Add(edge.TargetSchemaId))
+                {
+                    queue.Enqueue(edge.TargetSchemaId);
+                }
+            }
+        }
+
+        return seen;
+    }
+
+    private static IEnumerable<string> SchemaEdgeIds(OpenApiIndex index, IReadOnlyCollection<string> reachableSchemaIds)
+    {
+        foreach (var schemaId in reachableSchemaIds)
+        {
+            if (!index.SchemaEdges.TryGetValue(schemaId, out var outgoing))
+            {
+                continue;
+            }
+
+            foreach (var edge in outgoing.Where(edge => reachableSchemaIds.Contains(edge.TargetSchemaId)))
+            {
+                yield return GraphEdgeId(edge.SourceSchemaId, edge.Kind, edge.Label, edge.TargetSchemaId);
+            }
+        }
+    }
+
+    private static EndpointInfo WithEndpointDiff(EndpointInfo endpoint, string state, IReadOnlyList<DiffEntry> entries)
+    {
+        return new EndpointInfo
+        {
+            Id = endpoint.Id,
+            Method = endpoint.Method,
+            Path = endpoint.Path,
+            Summary = endpoint.Summary,
+            OperationId = endpoint.OperationId,
+            Tags = endpoint.Tags,
+            SchemaUses = endpoint.SchemaUses,
+            DiffState = state,
+            DiffEntries = entries
+        };
+    }
+
+    private static SchemaInfo WithSchemaDiff(
+        SchemaInfo schema,
+        string state,
+        IReadOnlyList<DiffEntry> entries,
+        OpenApiIndex baseIndex,
+        OpenApiIndex compareIndex)
+    {
+        return new SchemaInfo
+        {
+            Id = schema.Id,
+            Name = schema.Name,
+            Type = schema.Type,
+            Format = schema.Format,
+            Description = schema.Description,
+            Properties = DiffProperties(schema.Id, baseIndex, compareIndex),
+            EnumValues = schema.EnumValues,
+            OutgoingReferenceCount = schema.OutgoingReferenceCount,
+            IncomingReferenceCount = schema.IncomingReferenceCount,
+            CycleId = schema.CycleId,
+            DiffState = state,
+            DiffEntries = entries
+        };
+    }
+
+    private static GraphNode WithGraphNodeDiff(
+        GraphNode node,
+        string state,
+        IReadOnlyList<DiffEntry> entries,
+        OpenApiIndex baseIndex,
+        OpenApiIndex compareIndex)
+    {
+        var properties = node.Kind == "schema"
+            ? DiffProperties(node.Id, baseIndex, compareIndex)
+            : node.Properties;
+
+        return new GraphNode
+        {
+            Id = node.Id,
+            Kind = node.Kind,
+            Label = node.Label,
+            Subtitle = node.Subtitle,
+            Method = node.Method,
+            CycleId = node.CycleId,
+            Properties = properties,
+            EnumValues = node.EnumValues,
+            Tags = node.Tags,
+            DiffState = state,
+            DiffEntries = entries
+        };
+    }
+
+    private static IReadOnlyList<SchemaPropertyInfo> DiffProperties(string schemaId, OpenApiIndex baseIndex, OpenApiIndex compareIndex)
+    {
+        var before = baseIndex.Schemas.GetValueOrDefault(schemaId)?.Properties ?? [];
+        var after = compareIndex.Schemas.GetValueOrDefault(schemaId)?.Properties ?? [];
+        var beforeByName = before.ToDictionary(prop => prop.Name, StringComparer.Ordinal);
+        var afterByName = after.ToDictionary(prop => prop.Name, StringComparer.Ordinal);
+        var result = new List<SchemaPropertyInfo>();
+
+        foreach (var prop in after)
+        {
+            var state = beforeByName.TryGetValue(prop.Name, out var beforeProp)
+                ? string.Equals(PropertySignature(beforeProp), PropertySignature(prop), StringComparison.Ordinal) ? Unchanged : Modified
+                : Added;
+            result.Add(WithPropertyDiff(prop, state, beforeProp));
+        }
+
+        foreach (var prop in before.Where(prop => !afterByName.ContainsKey(prop.Name)))
+        {
+            result.Add(WithPropertyDiff(prop, Deleted, prop));
+        }
+
+        return result;
+    }
+
+    private static SchemaPropertyInfo WithPropertyDiff(SchemaPropertyInfo property, string state, SchemaPropertyInfo? before)
+    {
+        return new SchemaPropertyInfo
+        {
+            Name = property.Name,
+            Type = property.Type,
+            Format = property.Format,
+            SourceSchemaId = property.SourceSchemaId,
+            SourceSchemaName = property.SourceSchemaName,
+            Inherited = property.Inherited,
+            Required = property.Required,
+            Nullable = property.Nullable,
+            RefId = property.RefId,
+            ItemsRefId = property.ItemsRefId,
+            EnumValues = property.EnumValues,
+            DiffState = state,
+            PreviousType = state == Modified && before is not null ? PropertySignature(before) : null
+        };
+    }
+
+    private static string GraphEdgeId(string source, string kind, string label, string target)
+    {
+        return $"{source}|{kind}|{label}|{target}";
+    }
+
+    private static string SchemaUseSignature(EndpointSchemaUse use)
+    {
+        return $"{use.Kind} {use.Label} {StripSchemaPrefix(use.SchemaId)}";
+    }
+
+    private static string PropertySignature(SchemaPropertyInfo property)
+    {
+        var type = property.ItemsRefId is not null
+            ? $"{StripSchemaPrefix(property.ItemsRefId)}[]"
+            : property.RefId is not null
+                ? StripSchemaPrefix(property.RefId)
+                : SchemaType(property.Type, property.Format);
+        var required = property.Required ? "required" : "optional";
+        var nullable = property.Nullable ? ", nullable" : "";
+        var enums = property.EnumValues.Count == 0 ? "" : $", enum: {string.Join(", ", property.EnumValues)}";
+        return $"{type} ({required}{nullable}{enums})";
+    }
+
+    private static string SchemaType(SchemaInfo schema)
+    {
+        return SchemaType(schema.Type, schema.Format);
+    }
+
+    private static string SchemaType(string? type, string? format)
+    {
+        return string.Join(" ", new[] { type, format }.Where(value => !string.IsNullOrWhiteSpace(value)));
+    }
+
+    private static void AddChanged(List<DiffEntry> entries, string label, string? before, string? after)
+    {
+        if (!string.Equals(before ?? "", after ?? "", StringComparison.Ordinal))
+        {
+            entries.Add(NewEntry(Modified, label, before, after));
+        }
+    }
+
+    private static void AddSetChanges(List<DiffEntry> entries, string label, IEnumerable<string> before, IEnumerable<string> after)
+    {
+        var beforeSet = before.ToHashSet(StringComparer.Ordinal);
+        var afterSet = after.ToHashSet(StringComparer.Ordinal);
+        foreach (var value in afterSet.Except(beforeSet, StringComparer.Ordinal).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            entries.Add(NewEntry(Added, label, null, value));
+        }
+
+        foreach (var value in beforeSet.Except(afterSet, StringComparer.Ordinal).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            entries.Add(NewEntry(Deleted, label, value, null));
+        }
+    }
+
+    private static DiffEntry NewEntry(string state, string label, string? before, string? after)
+    {
+        return new DiffEntry
+        {
+            State = state,
+            Label = label,
+            Before = string.IsNullOrWhiteSpace(before) ? null : before,
+            After = string.IsNullOrWhiteSpace(after) ? null : after
+        };
+    }
+
+    private static string StripSchemaPrefix(string value)
+    {
+        return value.StartsWith("schema:", StringComparison.Ordinal) ? value["schema:".Length..] : value;
+    }
+
+    private static string EdgeLabel(string edgeId)
+    {
+        var parts = edgeId.Split('|');
+        return parts.Length == 4
+            ? $"{StripSchemaPrefix(parts[0])} -> {StripSchemaPrefix(parts[3])} ({parts[2]})"
+            : edgeId;
+    }
+
+    private sealed record DiffResult<T>(T Item, string State, IReadOnlyList<DiffEntry> Entries);
+
+    private sealed record EndpointDiffResult(EndpointInfo Endpoint, string State, IReadOnlyList<DiffEntry> Entries);
 }
 
 internal static class OpenApiIndexBuilder

@@ -25,6 +25,11 @@
                     <span id="fileLabel">Load JSON spec</span>
                     <input id="fileInput" type="file" accept=".json,application/json">
                 </label>
+                <button id="compareButton" class="compare-button hidden" type="button">
+                    <i data-lucide="git-compare-arrows"></i>
+                    <span id="compareLabel">View diff</span>
+                </button>
+                <input id="compareFileInput" type="file" accept=".json,application/json" hidden>
             </section>
 
             <section class="search-panel">
@@ -67,6 +72,17 @@
                     </span>
                 </button>
                 <div id="endpointList" class="endpoint-list section-body"></div>
+            </section>
+
+            <section id="changedEndpointSection" class="changed-section collapsible-section hidden" data-section="changed">
+                <button class="section-title section-toggle" type="button" data-toggle-section="changed" aria-expanded="true">
+                    <span>Changed endpoints</span>
+                    <span class="section-meta">
+                        <span id="changedEndpointCount">0</span>
+                        <i data-lucide="chevron-down"></i>
+                    </span>
+                </button>
+                <div id="changedEndpointList" class="endpoint-list section-body"></div>
             </section>
 
             <section class="selected-section collapsible-section" data-section="selected">

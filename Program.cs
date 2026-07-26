@@ -34,6 +34,33 @@ app.MapPost("/api/specs/import", async (HttpRequest request, OpenApiSpecStore st
     return Results.Ok(summary);
 });
 
+app.MapPost("/api/specs/{specId}/compare", async (string specId, HttpRequest request, OpenApiSpecStore store, CancellationToken cancellationToken) =>
+{
+    if (store.GetSummary(specId) is null)
+    {
+        return Results.NotFound(new { error = $"Base spec '{specId}' is not loaded." });
+    }
+
+    if (!request.HasFormContentType)
+    {
+        return Results.BadRequest(new { error = "Upload a JSON OpenAPI file as multipart/form-data." });
+    }
+
+    var form = await request.ReadFormAsync(cancellationToken);
+    var file = form.Files.GetFile("file") ?? form.Files.FirstOrDefault();
+    if (file is null || file.Length == 0)
+    {
+        return Results.BadRequest(new { error = "No file was uploaded." });
+    }
+
+    await using var stream = file.OpenReadStream();
+    var compareSummary = await store.ImportComparisonAsync(stream, file.FileName, cancellationToken);
+    var diff = store.GetDiffSummary(specId, compareSummary.SpecId);
+    return diff is null
+        ? Results.NotFound(new { error = "Unable to compare the selected specs." })
+        : Results.Ok(diff);
+});
+
 app.MapGet("/api/specs/current", (OpenApiSpecStore store) =>
 {
     return store.CurrentSpecId is null
@@ -51,14 +78,14 @@ app.MapGet("/api/specs/{specId}/endpoints", (
     return Results.Ok(store.SearchEndpoints(specId, query, method, limit ?? 100));
 });
 
-app.MapGet("/api/specs/{specId}/schemas", (string specId, string? schemaId, OpenApiSpecStore store) =>
+app.MapGet("/api/specs/{specId}/schemas", (string specId, string? schemaId, string? compareSpecId, OpenApiSpecStore store) =>
 {
     if (string.IsNullOrWhiteSpace(schemaId))
     {
         return Results.BadRequest(new { error = "Provide a schemaId query parameter." });
     }
 
-    var schema = store.GetSchema(specId, schemaId);
+    var schema = store.GetSchema(specId, schemaId, compareSpecId);
     return schema is null
         ? Results.NotFound(new { error = $"Schema '{schemaId}' was not found." })
         : Results.Ok(schema);

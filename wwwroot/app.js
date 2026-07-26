@@ -20,6 +20,8 @@ const schemaExplorerMaxDepth = 24;
 
 const state = {
     specId: null,
+    compareSpecId: null,
+    changedEndpoints: [],
     endpoints: [],
     allEndpoints: [],
     selected: new Map(),
@@ -42,6 +44,9 @@ const els = {
     appShell: document.querySelector(".app-shell"),
     fileInput: document.getElementById("fileInput"),
     fileLabel: document.getElementById("fileLabel"),
+    compareButton: document.getElementById("compareButton"),
+    compareLabel: document.getElementById("compareLabel"),
+    compareFileInput: document.getElementById("compareFileInput"),
     specMeta: document.getElementById("specMeta"),
     endpointSearch: document.getElementById("endpointSearch"),
     methodFiltersToggle: document.getElementById("methodFiltersToggle"),
@@ -50,6 +55,9 @@ const els = {
     favoriteCount: document.getElementById("favoriteCount"),
     endpointList: document.getElementById("endpointList"),
     endpointCount: document.getElementById("endpointCount"),
+    changedEndpointSection: document.getElementById("changedEndpointSection"),
+    changedEndpointList: document.getElementById("changedEndpointList"),
+    changedEndpointCount: document.getElementById("changedEndpointCount"),
     selectedList: document.getElementById("selectedList"),
     selectedCount: document.getElementById("selectedCount"),
     clearSelection: document.getElementById("clearSelection"),
@@ -99,12 +107,23 @@ window.addEventListener("DOMContentLoaded", () => {
     wireEvents();
     initializeGraph();
     renderSectionCollapse();
+    renderDiffControls();
+    renderChangedEndpoints();
     renderDetails(null);
     refreshIcons();
 });
 
 function wireEvents() {
     els.fileInput.addEventListener("change", importSpec);
+    els.compareButton?.addEventListener("click", () => {
+        if (state.compareSpecId) {
+            clearDiff();
+            return;
+        }
+
+        els.compareFileInput?.click();
+    });
+    els.compareFileInput?.addEventListener("change", importComparisonSpec);
     els.endpointSearch.addEventListener("input", () => {
         clearTimeout(state.searchTimer);
         state.searchTimer = setTimeout(loadEndpoints, 160);
@@ -443,14 +462,18 @@ async function importSpec() {
 
         const summary = await response.json();
         state.specId = summary.specId;
+        state.compareSpecId = null;
+        state.changedEndpoints = [];
         state.selected.clear();
         state.currentDetailsNode = null;
         state.schemaCache.clear();
         state.schemaExplorerLoadErrors.clear();
         closeSchemaExplorer();
+        renderDiffControls();
         renderSpecMeta(summary);
         await loadAllEndpoints();
         await loadEndpoints();
+        renderChangedEndpoints();
         renderSelected();
         updateGraph();
         setStatus("Ready");
@@ -459,6 +482,72 @@ async function importSpec() {
         setStatus("Import failed");
         els.specMeta.textContent = "Import failed";
         els.specMeta.title = "";
+    }
+}
+
+async function importComparisonSpec() {
+    const file = els.compareFileInput?.files?.[0];
+    if (!file || !state.specId) {
+        return;
+    }
+
+    setStatus("Comparing");
+
+    const form = new FormData();
+    form.append("file", file);
+
+    try {
+        const response = await fetch(`/api/specs/${state.specId}/compare`, {
+            method: "POST",
+            body: form
+        });
+
+        if (!response.ok) {
+            throw new Error(await response.text());
+        }
+
+        const diff = await response.json();
+        state.compareSpecId = diff.compareSpecId;
+        state.changedEndpoints = diff.changedEndpoints || [];
+        state.schemaCache.clear();
+        state.schemaExplorerLoadErrors.clear();
+        closeSchemaExplorer();
+        renderDiffControls();
+        renderChangedEndpoints();
+        renderFavorites();
+        renderEndpoints();
+        renderSelected();
+        updateGraph();
+        setStatus("Diff ready");
+    } catch (error) {
+        console.error(error);
+        setStatus("Compare failed");
+    } finally {
+        if (els.compareFileInput) {
+            els.compareFileInput.value = "";
+        }
+    }
+}
+
+function clearDiff() {
+    state.compareSpecId = null;
+    state.changedEndpoints = [];
+    state.schemaCache.clear();
+    state.schemaExplorerLoadErrors.clear();
+    closeSchemaExplorer();
+    renderDiffControls();
+    renderChangedEndpoints();
+    renderFavorites();
+    renderEndpoints();
+    renderSelected();
+    updateGraph();
+}
+
+function renderDiffControls() {
+    els.compareButton?.classList.toggle("hidden", !state.specId);
+    els.compareButton?.classList.toggle("danger", Boolean(state.compareSpecId));
+    if (els.compareLabel) {
+        els.compareLabel.textContent = state.compareSpecId ? "Clear diff" : "View diff";
     }
 }
 
@@ -513,14 +602,14 @@ function renderEndpoints() {
     els.endpointList.innerHTML = "";
 
     for (const endpoint of state.endpoints) {
-        els.endpointList.appendChild(createEndpointRow(endpoint));
+        els.endpointList.appendChild(createEndpointRow(withKnownEndpointDiff(endpoint)));
     }
 
     refreshIcons();
 }
 
 function renderFavorites() {
-    const favorites = state.allEndpoints.filter(endpoint => state.favorites.has(endpoint.id));
+    const favorites = state.allEndpoints.filter(endpoint => state.favorites.has(endpoint.id)).map(withKnownEndpointDiff);
     els.favoriteCount.textContent = favorites.length.toString();
     els.favoriteList.innerHTML = "";
 
@@ -536,9 +625,32 @@ function renderFavorites() {
     refreshIcons();
 }
 
+function renderChangedEndpoints() {
+    if (!els.changedEndpointSection || !els.changedEndpointList || !els.changedEndpointCount) {
+        return;
+    }
+
+    const changed = state.changedEndpoints || [];
+    els.changedEndpointSection.classList.toggle("hidden", changed.length === 0);
+    els.changedEndpointCount.textContent = changed.length.toString();
+    els.changedEndpointList.innerHTML = "";
+
+    if (changed.length === 0) {
+        els.changedEndpointList.innerHTML = `<div class="empty-list">No endpoint changes</div>`;
+        refreshIcons();
+        return;
+    }
+
+    for (const endpoint of changed) {
+        els.changedEndpointList.appendChild(createEndpointRow(endpoint));
+    }
+
+    refreshIcons();
+}
+
 function createEndpointRow(endpoint) {
     const row = document.createElement("div");
-    row.className = `endpoint-row ${state.selected.has(endpoint.id) ? "selected" : ""}`;
+    row.className = `endpoint-row ${state.selected.has(endpoint.id) ? "selected" : ""} ${diffClass(endpoint.diffState)}`;
 
     const favoriteButton = document.createElement("button");
     favoriteButton.className = `favorite-button ${state.favorites.has(endpoint.id) ? "active" : ""}`;
@@ -557,10 +669,16 @@ function createEndpointRow(endpoint) {
             <span class="endpoint-path">${escapeHtml(endpoint.path)}</span>
             <span class="endpoint-summary">${escapeHtml(endpoint.summary || endpoint.operationId || endpoint.tags?.[0] || "")}</span>
         </span>
+        ${renderDiffBadge(endpoint.diffState)}
     `;
     button.addEventListener("click", () => toggleEndpoint(endpoint));
     row.append(favoriteButton, button);
     return row;
+}
+
+function withKnownEndpointDiff(endpoint) {
+    const changed = state.changedEndpoints?.find(item => item.id === endpoint.id);
+    return changed ? { ...endpoint, diffState: changed.diffState, diffEntries: changed.diffEntries || [] } : endpoint;
 }
 
 function toggleFavorite(endpointId) {
@@ -593,16 +711,18 @@ function renderSelected() {
     els.selectedCount.textContent = state.selected.size.toString();
 
     for (const endpoint of state.selected.values()) {
+        const annotated = withKnownEndpointDiff(endpoint);
         const button = document.createElement("button");
-        button.className = "selected-item";
+        button.className = `selected-item ${diffClass(annotated.diffState)}`;
         button.type = "button";
         button.innerHTML = `
-            <span class="method-badge ${escapeHtml(endpoint.method)}">${escapeHtml(endpoint.method)}</span>
+            <span class="method-badge ${escapeHtml(annotated.method)}">${escapeHtml(annotated.method)}</span>
             <span class="endpoint-main">
-                <span class="endpoint-path">${escapeHtml(endpoint.path)}</span>
+                <span class="endpoint-path">${escapeHtml(annotated.path)}</span>
             </span>
+            ${renderDiffBadge(annotated.diffState)}
         `;
-        button.addEventListener("click", () => toggleEndpoint(endpoint));
+        button.addEventListener("click", () => toggleEndpoint(annotated));
         els.selectedList.appendChild(button);
     }
 }
@@ -627,9 +747,9 @@ function initializeGraph() {
                     "text-halign": "center",
                     "color": "#23362b",
                     "font-weight": "bold",
-                    "background-color": "#9bc7c5",
-                    "border-width": 1,
-                    "border-color": "#1bb28c",
+                    "background-color": "#f8fafc",
+                    "border-width": 2,
+                    "border-color": "#315f86",
                     "width": "data(width)",
                     "height": "data(height)",
                     "shape": "round-rectangle",
@@ -655,7 +775,7 @@ function initializeGraph() {
                 style: {
                     "shape": "round-rectangle",
                     "background-color": "#efeeea",
-                    "border-color": "#1bb28c"
+                    "border-color": "#7c3aed"
                 }
             },
             { selector: "node[method = 'GET']", style: { "background-color": "#ebf4ff" } },
@@ -676,9 +796,9 @@ function initializeGraph() {
                 style: {
                     "curve-style": "bezier",
                     "target-arrow-shape": "triangle",
-                    "target-arrow-color": "#1bb28c",
-                    "line-color": "#1bb28c",
-                    "width": 2,
+                    "target-arrow-color": "#334155",
+                    "line-color": "#334155",
+                    "width": 2.4,
                     "label": "data(label)",
                     "font-size": "data(edgeFontSize)",
                     "font-weight": "bold",
@@ -692,15 +812,59 @@ function initializeGraph() {
                     "overlay-padding": 4
                 }
             },
-            { selector: "edge[kind = 'Property']", style: { "line-color": "#6da6a3", "target-arrow-color": "#6da6a3" } },
+            { selector: "edge[kind = 'Property']", style: { "line-color": "#315f86", "target-arrow-color": "#315f86" } },
             { selector: "edge[kind = 'ArrayItem']", style: { "line-color": "#23362b", "target-arrow-color": "#23362b" } },
-            { selector: "edge[kind = 'Inheritance']", style: { "line-color": "#e86a58", "target-arrow-color": "#e86a58", "width": 4, "font-size": "data(inheritanceFontSize)", "font-weight": "bold" } },
-            { selector: "edge[kind = 'AllOf']", style: { "line-color": "#1bb28c", "target-arrow-color": "#1bb28c", "line-style": "dashed" } },
-            { selector: "edge[kind = 'OneOf']", style: { "line-color": "#23362b", "target-arrow-color": "#23362b", "line-style": "dotted" } },
-            { selector: "edge[kind = 'AnyOf']", style: { "line-color": "#fed45b", "target-arrow-color": "#fed45b", "line-style": "dotted" } },
-            { selector: "edge[kind = 'ResponseBody']", style: { "line-color": "#61affe", "target-arrow-color": "#61affe", "width": 2.6 } },
-            { selector: "edge[kind = 'RequestBody']", style: { "line-color": "#49cc90", "target-arrow-color": "#49cc90", "width": 2.6 } },
-            { selector: "edge[kind = 'Parameter']", style: { "line-color": "#50e3c2", "target-arrow-color": "#50e3c2" } },
+            { selector: "edge[kind = 'Inheritance']", style: { "line-color": "#7c3aed", "target-arrow-color": "#7c3aed", "width": 4, "font-size": "data(inheritanceFontSize)", "font-weight": "bold" } },
+            { selector: "edge[kind = 'AllOf']", style: { "line-color": "#3b82f6", "target-arrow-color": "#3b82f6", "line-style": "dashed" } },
+            { selector: "edge[kind = 'OneOf']", style: { "line-color": "#475569", "target-arrow-color": "#475569", "line-style": "dotted" } },
+            { selector: "edge[kind = 'AnyOf']", style: { "line-color": "#8b5cf6", "target-arrow-color": "#8b5cf6", "line-style": "dotted" } },
+            { selector: "edge[kind = 'ResponseBody']", style: { "line-color": "#3b82f6", "target-arrow-color": "#3b82f6", "width": 2.6 } },
+            { selector: "edge[kind = 'RequestBody']", style: { "line-color": "#7c3aed", "target-arrow-color": "#7c3aed", "width": 2.6 } },
+            { selector: "edge[kind = 'Parameter']", style: { "line-color": "#0891b2", "target-arrow-color": "#0891b2" } },
+            {
+                selector: "node[diffState = 'added']",
+                style: {
+                    "border-width": 3,
+                    "border-color": "#047857",
+                    "background-color": "#d1fae5"
+                }
+            },
+            {
+                selector: "node[diffState = 'deleted']",
+                style: {
+                    "border-width": 3,
+                    "border-color": "#b91c1c",
+                    "border-style": "dashed",
+                    "background-color": "#fee2e2",
+                    "opacity": 0.9
+                }
+            },
+            {
+                selector: "node[diffState = 'modified']",
+                style: {
+                    "border-width": 3,
+                    "border-color": "#b45309",
+                    "background-color": "#fef3c7"
+                }
+            },
+            {
+                selector: "edge[diffState = 'added']",
+                style: {
+                    "line-color": "#047857",
+                    "target-arrow-color": "#047857",
+                    "width": 4
+                }
+            },
+            {
+                selector: "edge[diffState = 'deleted']",
+                style: {
+                    "line-color": "#b91c1c",
+                    "target-arrow-color": "#b91c1c",
+                    "line-style": "dashed",
+                    "width": 4,
+                    "opacity": 0.92
+                }
+            },
             {
                 selector: ":selected",
                 style: {
@@ -745,6 +909,9 @@ async function updateGraph() {
         hideEnums: els.hideEnumsInput.checked,
         hideErrorResponses: els.hideErrorResponsesInput.checked
     };
+    if (state.compareSpecId) {
+        body.compareSpecId = state.compareSpecId;
+    }
 
     const response = await fetch(`/api/specs/${state.specId}/graph`, {
         method: "POST",
@@ -785,6 +952,8 @@ function renderGraph(graph) {
                     properties: node.properties || [],
                     enumValues: node.enumValues || [],
                     enumCount: node.enumValues?.length || 0,
+                    diffState: node.diffState || "",
+                    diffEntries: node.diffEntries || [],
                     width: metrics.width,
                     height: metrics.height,
                     textMaxWidth: metrics.textMaxWidth,
@@ -803,6 +972,7 @@ function renderGraph(graph) {
                 kind: edge.kind,
                 label: shortEdgeLabel(edge.label),
                 fullLabel: edge.label,
+                diffState: edge.diffState || "",
                 edgeFontSize,
                 inheritanceFontSize
             }
@@ -1035,6 +1205,7 @@ function endpointNodeMetrics(node, widthScale, heightScale, textScale) {
 function endpointCardImage(node, width, height, widthScale, heightScale, textScale) {
     const method = (node.method || "HTTP").toUpperCase();
     const colors = methodColors(method);
+    const diff = diffColors(node.diffState);
     const radius = 6;
     const padding = endpointCardPadding(heightScale);
     const methodFont = endpointMethodFontSize(textScale);
@@ -1046,10 +1217,11 @@ function endpointCardImage(node, width, height, widthScale, heightScale, textSca
 
     const svg = `
         <svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-            <rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="${radius}" fill="${colors.tint}" stroke="${colors.primary}" stroke-width="1"/>
+            <rect x="0.5" y="0.5" width="${width - 1}" height="${height - 1}" rx="${radius}" fill="${diff.tint || colors.tint}" stroke="${diff.stroke || colors.primary}" stroke-width="${diff.stroke ? 3 : 1}" stroke-dasharray="${node.diffState === "deleted" ? "7 5" : "0"}"/>
             <rect x="${padding}" y="${padding}" width="${methodWidth}" height="${height - padding * 2}" rx="4" fill="${colors.primary}"/>
             <text x="${padding + methodWidth / 2}" y="${methodY}" text-anchor="middle" font-family="Segoe UI, Arial, sans-serif" font-size="${methodFont}" font-weight="900" fill="${colors.methodText}">${escapeXml(method)}</text>
             <text x="${pathX}" y="${pathY}" font-family="Segoe UI, Arial, sans-serif" font-size="${pathFont}" font-weight="900" fill="#23362b">${escapeXml(node.label)}</text>
+            ${diff.label ? `<text x="${width - padding}" y="${Math.max(14, padding + 9)}" text-anchor="end" font-family="Segoe UI, Arial, sans-serif" font-size="10" font-weight="900" fill="${diff.stroke}">${diff.label}</text>` : ""}
         </svg>
     `.replace(/\s+/g, " ").trim();
 
@@ -1108,7 +1280,23 @@ function methodColors(method) {
         DELETE: { primary: "#f93e3e", tint: "#fff0f0", methodText: "#ffffff" }
     };
 
-    return colors[method] || { primary: "#9bc7c5", tint: "#efeeea", methodText: "#23362b" };
+    return colors[method] || { primary: "#4f78a8", tint: "#f3f6f9", methodText: "#23362b" };
+}
+
+function diffColors(stateName) {
+    if (stateName === "added") {
+        return { stroke: "#047857", tint: "#d1fae5", label: "ADDED" };
+    }
+
+    if (stateName === "deleted") {
+        return { stroke: "#b91c1c", tint: "#fee2e2", label: "DELETED" };
+    }
+
+    if (stateName === "modified") {
+        return { stroke: "#b45309", tint: "#fef3c7", label: "MODIFIED" };
+    }
+
+    return {};
 }
 
 function wrapNodeLabel(value, maxChars, maxLines) {
@@ -1287,7 +1475,8 @@ function renderDetails(data) {
     }
 
     els.detailsTitle.textContent = data.rawLabel || data.label;
-    els.detailsBadge.textContent = "";
+    els.detailsBadge.textContent = diffLabel(data.diffState);
+    els.detailsBadge.className = diffClass(data.diffState);
     els.detailsBody.innerHTML = renderNodeSummary(data, false) + renderSchemaExplorerAction(data);
     refreshIcons();
 }
@@ -1295,8 +1484,10 @@ function renderDetails(data) {
 function renderEdgeDetails(data) {
     state.currentDetailsNode = null;
     els.detailsTitle.textContent = data.kind;
-    els.detailsBadge.textContent = "";
+    els.detailsBadge.textContent = diffLabel(data.diffState);
+    els.detailsBadge.className = diffClass(data.diffState);
     els.detailsBody.innerHTML = `
+        ${renderDiffEntries(data)}
         <div class="detail-block">
             <div class="detail-label">Label</div>
             <div class="detail-value">${escapeHtml(data.fullLabel || data.label || "")}</div>
@@ -1331,6 +1522,7 @@ function renderNodeSummary(data, compact) {
     const tags = data.tags || [];
 
     let html = "";
+    html += renderDiffEntries(data);
     if (compact) {
         html += `
             <div class="detail-block">
@@ -1387,12 +1579,14 @@ function renderNodeSummary(data, compact) {
 
 function renderPropertyRow(prop) {
     return `
-        <div class="property-row property-kind-${propertyKind(prop)} ${prop.inherited ? "inherited" : ""}">
+        <div class="property-row property-kind-${propertyKind(prop)} ${prop.inherited ? "inherited" : ""} ${diffClass(prop.diffState)}">
             <div class="property-main">
                 <span class="property-name">${prop.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(prop.name)}</span>
                 ${prop.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(prop.enumValues)}</div>` : ""}
+                ${prop.previousType ? `<span class="property-diff-before">${escapeHtml(prop.previousType)}</span>` : ""}
             </div>
             <span class="property-type">${escapeHtml(propertyType(prop))}</span>
+            ${renderDiffBadge(prop.diffState)}
         </div>
     `;
 }
@@ -1459,6 +1653,65 @@ function renderEnumChips(values) {
         .join("");
 }
 
+function renderDiffEntries(data) {
+    const entries = data?.diffEntries || [];
+    if (!data?.diffState || data.diffState === "unchanged") {
+        return "";
+    }
+
+    const rows = entries.length === 0
+        ? `<div class="diff-entry ${diffClass(data.diffState)}">
+            <span>${escapeHtml(diffLabel(data.diffState))}</span>
+            <strong>${escapeHtml(data.rawLabel || data.label || data.id || "")}</strong>
+        </div>`
+        : entries.map(entry => `
+            <div class="diff-entry ${diffClass(entry.state)}">
+                <span>${escapeHtml(entry.label)}</span>
+                <strong>${escapeHtml(diffEntryValue(entry))}</strong>
+            </div>
+        `).join("");
+
+    return `
+        <div class="detail-block diff-block">
+            <div class="detail-label">Diff</div>
+            <div class="diff-entry-list">${rows}</div>
+        </div>
+    `;
+}
+
+function diffEntryValue(entry) {
+    if (entry.before && entry.after) {
+        return `${entry.before} -> ${entry.after}`;
+    }
+
+    return entry.after || entry.before || diffLabel(entry.state);
+}
+
+function renderDiffBadge(stateName) {
+    const label = diffLabel(stateName);
+    return label ? `<span class="diff-badge ${diffClass(stateName)}">${escapeHtml(label)}</span>` : "";
+}
+
+function diffLabel(stateName) {
+    if (stateName === "added") {
+        return "Added";
+    }
+
+    if (stateName === "deleted") {
+        return "Deleted";
+    }
+
+    if (stateName === "modified") {
+        return "Modified";
+    }
+
+    return "";
+}
+
+function diffClass(stateName) {
+    return stateName && stateName !== "unchanged" ? `diff-${stateName}` : "";
+}
+
 async function openSchemaExplorer(data) {
     if (!state.specId || !isSchemaNode(data)) {
         return;
@@ -1523,6 +1776,9 @@ async function loadSchema(schemaId) {
     state.schemaExplorerLoadErrors.delete(schemaId);
 
     const params = new URLSearchParams({ schemaId });
+    if (state.compareSpecId) {
+        params.set("compareSpecId", state.compareSpecId);
+    }
     const response = await fetch(`/api/specs/${state.specId}/schemas?${params}`);
     if (!response.ok) {
         throw new Error(await response.text());
@@ -1555,7 +1811,8 @@ function renderSchemaTreeNode(schema, pathKey, trail, depth) {
     const type = schema.type || "object";
     const meta = [
         type,
-        schema.format
+        schema.format,
+        diffLabel(schema.diffState)
     ].filter(Boolean);
 
     const enumHtml = enumValues.length
@@ -1568,12 +1825,13 @@ function renderSchemaTreeNode(schema, pathKey, trail, depth) {
 
     return `
         <div class="schema-tree-node schema-tree-level-${depth % 4}" style="--schema-depth: ${depth}">
-            <div class="schema-tree-model">
+            <div class="schema-tree-model ${diffClass(schema.diffState)}">
                 <div class="schema-tree-model-main">
                     <div class="schema-tree-model-name">${escapeHtml(schema.label)}</div>
                     <div class="schema-tree-model-meta">${meta.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>
                 </div>
             </div>
+            ${renderDiffEntries(schema)}
             ${enumHtml}
             ${propertiesHtml}
         </div>
@@ -1631,16 +1889,18 @@ function renderSchemaTreeProperty(prop, pathKey, trail, depth) {
         : "";
 
     return `
-        <div class="schema-tree-property property-kind-${propertyKind(prop)}">
+        <div class="schema-tree-property property-kind-${propertyKind(prop)} ${diffClass(prop.diffState)}">
             <div class="schema-tree-property-row">
                 ${toggle}
                 <span class="schema-tree-origin-badge ${prop.inherited ? "inherited" : "declared"}" title="${prop.inherited ? `Inherited from ${escapeHtml(prop.sourceSchemaName || "schema")}` : "Declared"}">${prop.inherited ? "i" : "d"}</span>
                 <div class="schema-tree-property-main">
                     <span class="schema-tree-property-name">${prop.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(prop.name)}</span>
                     ${prop.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(prop.enumValues)}</div>` : ""}
+                    ${prop.previousType ? `<span class="property-diff-before">${escapeHtml(prop.previousType)}</span>` : ""}
                 </div>
                 ${extra}
                 <span class="property-type">${escapeHtml(schemaTreePropertyType(prop))}</span>
+                ${renderDiffBadge(prop.diffState)}
             </div>
             ${childHtml}
         </div>
@@ -1679,6 +1939,8 @@ function normalizeSchema(schema, fullyLoaded = false) {
         enumValues,
         nullable: schema.nullable,
         cycleId: schema.cycleId,
+        diffState: schema.diffState,
+        diffEntries: schema.diffEntries || [],
         fullyLoaded
     };
 }
