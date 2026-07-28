@@ -186,7 +186,8 @@ body.resizing-panels {
 }
 
 .compare-button.hidden,
-.changed-section.hidden {
+.changed-section.hidden,
+.affected-section.hidden {
     display: none;
 }
 
@@ -412,6 +413,7 @@ body.resizing-panels {
 .favorite-section,
 .endpoint-section,
 .changed-section,
+.affected-section,
 .selected-section {
     display: flex;
     min-height: 0;
@@ -422,7 +424,8 @@ body.resizing-panels {
     flex: 1;
 }
 
-.changed-section {
+.changed-section,
+.affected-section {
     max-height: 260px;
 }
 
@@ -591,6 +594,11 @@ body.resizing-panels {
     background: #fef3c7;
 }
 
+.endpoint-row.diff-affected,
+.selected-item.diff-affected {
+    background: #dbeafe;
+}
+
 .endpoint-row.selected {
     background: #dbeafe;
     box-shadow: inset 5px 0 0 #1d4ed8, inset 0 0 0 1.5px #1d4ed8;
@@ -606,6 +614,10 @@ body.resizing-panels {
 
 .endpoint-row.selected.diff-modified {
     background: linear-gradient(90deg, #dbeafe 0, #dbeafe 42px, #fef3c7 42px);
+}
+
+.endpoint-row.selected.diff-affected {
+    background: linear-gradient(90deg, #eff6ff 0, #eff6ff 42px, #dbeafe 42px);
 }
 
 .method-badge {
@@ -704,6 +716,12 @@ body.resizing-panels {
 .diff-badge.diff-modified {
     border-color: #b45309;
     background: #b45309;
+    color: #ffffff;
+}
+
+.diff-badge.diff-affected {
+    border-color: #2563eb;
+    background: #2563eb;
     color: #ffffff;
 }
 
@@ -1210,6 +1228,12 @@ body.resizing-panels {
     color: #ffffff;
 }
 
+#detailsBadge.diff-affected {
+    border-color: #2563eb;
+    background: #2563eb;
+    color: #ffffff;
+}
+
 .details-body {
     padding: 14px 16px;
 }
@@ -1347,6 +1371,11 @@ body.resizing-panels {
 .diff-entry.diff-modified {
     border-color: #b45309;
     background: #fef3c7;
+}
+
+.diff-entry.diff-affected {
+    border-color: #2563eb;
+    background: #dbeafe;
 }
 
 .tag-row {

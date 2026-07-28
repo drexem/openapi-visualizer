@@ -88,6 +88,7 @@ public sealed class GraphRequest
     public bool AllReachable { get; init; }
     public bool HideEnums { get; init; }
     public bool HideErrorResponses { get; init; }
+    public bool ShowOnlyChanged { get; init; }
 }
 
 public sealed class GraphResponse

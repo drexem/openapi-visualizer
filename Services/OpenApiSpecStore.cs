@@ -381,6 +381,7 @@ internal static class OpenApiDiffBuilder
     private const string Added = "added";
     private const string Deleted = "deleted";
     private const string Modified = "modified";
+    private const string Affected = "affected";
     private const string Unchanged = "unchanged";
 
     public static SpecDiffSummary BuildSummary(OpenApiIndex baseIndex, OpenApiIndex compareIndex)
@@ -457,14 +458,27 @@ internal static class OpenApiDiffBuilder
             if (node.Kind == "endpoint")
             {
                 var endpointDiff = EndpointState(nodeId, baseIndex, compareIndex, endpointDiffs, schemaDiffs, edgeDiffs);
+                if (request.ShowOnlyChanged && endpointDiff.State == Unchanged)
+                {
+                    continue;
+                }
+
                 nodes[nodeId] = WithGraphNodeDiff(node, endpointDiff.State, endpointDiff.Entries, baseIndex, compareIndex);
                 continue;
             }
 
-            var schemaDiff = schemaDiffs.GetValueOrDefault(nodeId);
-            nodes[nodeId] = schemaDiff is null
-                ? WithGraphNodeDiff(node, Unchanged, [], baseIndex, compareIndex)
-                : WithGraphNodeDiff(node, schemaDiff.State, schemaDiff.Entries, baseIndex, compareIndex);
+            var schemaDiff = request.ShowOnlyChanged
+                ? SchemaState(nodeId, baseIndex, compareIndex, schemaDiffs, edgeDiffs)
+                : schemaDiffs.GetValueOrDefault(nodeId) ?? new DiffResult<SchemaInfo>(
+                    compareIndex.Schemas.GetValueOrDefault(nodeId) ?? baseIndex.Schemas[nodeId],
+                    Unchanged,
+                    []);
+            if (request.ShowOnlyChanged && schemaDiff.State == Unchanged)
+            {
+                continue;
+            }
+
+            nodes[nodeId] = WithGraphNodeDiff(node, schemaDiff.State, schemaDiff.Entries, baseIndex, compareIndex);
         }
 
         foreach (var edgeId in baseGraph.Edges.Select(edge => edge.Id).Concat(compareGraph.Edges.Select(edge => edge.Id)).Distinct(StringComparer.Ordinal))
@@ -473,6 +487,11 @@ internal static class OpenApiDiffBuilder
             var compareEdge = compareGraph.Edges.FirstOrDefault(edge => string.Equals(edge.Id, edgeId, StringComparison.Ordinal));
             var edge = compareEdge ?? baseEdge;
             if (edge is null)
+            {
+                continue;
+            }
+
+            if (!nodes.ContainsKey(edge.Source) || !nodes.ContainsKey(edge.Target))
             {
                 continue;
             }
@@ -521,7 +540,8 @@ internal static class OpenApiDiffBuilder
             IncludeProperties = request.IncludeProperties,
             AllReachable = request.AllReachable,
             HideEnums = request.HideEnums,
-            HideErrorResponses = request.HideErrorResponses
+            HideErrorResponses = request.HideErrorResponses,
+            ShowOnlyChanged = request.ShowOnlyChanged
         };
     }
 
@@ -547,8 +567,8 @@ internal static class OpenApiDiffBuilder
         }
 
         var endpoint = compareIndex.Endpoints.GetValueOrDefault(endpointId) ?? baseIndex.Endpoints[endpointId];
-        var baseReachable = baseIndex.Endpoints.ContainsKey(endpointId) ? ReachableSchemaIds(baseIndex, endpointId) : [];
-        var compareReachable = compareIndex.Endpoints.ContainsKey(endpointId) ? ReachableSchemaIds(compareIndex, endpointId) : [];
+        var baseReachable = baseIndex.Endpoints.ContainsKey(endpointId) ? ReachableSchemaIdsFromEndpoint(baseIndex, endpointId) : [];
+        var compareReachable = compareIndex.Endpoints.ContainsKey(endpointId) ? ReachableSchemaIdsFromEndpoint(compareIndex, endpointId) : [];
         var reachable = baseReachable.Concat(compareReachable).ToHashSet(StringComparer.Ordinal);
         var entries = new List<DiffEntry>();
 
@@ -586,7 +606,67 @@ internal static class OpenApiDiffBuilder
 
         return entries.Count == 0
             ? new EndpointDiffResult(endpoint, Unchanged, [])
-            : new EndpointDiffResult(endpoint, Modified, entries.Take(16).ToArray());
+            : new EndpointDiffResult(endpoint, Affected, entries.Take(16).ToArray());
+    }
+
+    private static DiffResult<SchemaInfo> SchemaState(
+        string schemaId,
+        OpenApiIndex baseIndex,
+        OpenApiIndex compareIndex,
+        IReadOnlyDictionary<string, DiffResult<SchemaInfo>> schemaDiffs,
+        IReadOnlyDictionary<string, string> edgeDiffs)
+    {
+        if (schemaDiffs.TryGetValue(schemaId, out var schemaDiff) && schemaDiff.State != Unchanged)
+        {
+            return schemaDiff;
+        }
+
+        var schema = compareIndex.Schemas.GetValueOrDefault(schemaId) ?? baseIndex.Schemas.GetValueOrDefault(schemaId);
+        if (schema is null)
+        {
+            throw new InvalidOperationException($"Schema '{schemaId}' is not available in either compared spec.");
+        }
+
+        var baseReachable = baseIndex.Schemas.ContainsKey(schemaId) ? ReachableSchemaIdsFromSchema(baseIndex, schemaId) : [];
+        var compareReachable = compareIndex.Schemas.ContainsKey(schemaId) ? ReachableSchemaIdsFromSchema(compareIndex, schemaId) : [];
+        var reachable = baseReachable.Concat(compareReachable).ToHashSet(StringComparer.Ordinal);
+        var entries = new List<DiffEntry>();
+
+        foreach (var affectedSchemaId in reachable.Where(id => !string.Equals(id, schemaId, StringComparison.Ordinal)).Order(StringComparer.OrdinalIgnoreCase))
+        {
+            if (schemaDiffs.TryGetValue(affectedSchemaId, out var affectedDiff) && affectedDiff.State != Unchanged)
+            {
+                entries.Add(new DiffEntry
+                {
+                    State = affectedDiff.State,
+                    Label = "Affected model",
+                    Before = affectedDiff.State == Added ? null : StripSchemaPrefix(affectedSchemaId),
+                    After = affectedDiff.State == Deleted ? null : StripSchemaPrefix(affectedSchemaId)
+                });
+            }
+        }
+
+        var relatedEdgeIds = SchemaEdgeIdsTouching(baseIndex, reachable)
+            .Concat(SchemaEdgeIdsTouching(compareIndex, reachable))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        foreach (var edgeId in relatedEdgeIds)
+        {
+            if (edgeDiffs.TryGetValue(edgeId, out var edgeState) && edgeState != Unchanged)
+            {
+                entries.Add(new DiffEntry
+                {
+                    State = edgeState,
+                    Label = "Affected relationship",
+                    Before = edgeState == Added ? null : EdgeLabel(edgeId),
+                    After = edgeState == Deleted ? null : EdgeLabel(edgeId)
+                });
+            }
+        }
+
+        return entries.Count == 0
+            ? new DiffResult<SchemaInfo>(schema, Unchanged, [])
+            : new DiffResult<SchemaInfo>(schema, Affected, entries.Take(16).ToArray());
     }
 
     private static IReadOnlyDictionary<string, DiffResult<EndpointInfo>> BuildEndpointDiffs(OpenApiIndex baseIndex, OpenApiIndex compareIndex)
@@ -727,7 +807,7 @@ internal static class OpenApiDiffBuilder
         return ids;
     }
 
-    private static IReadOnlyCollection<string> ReachableSchemaIds(OpenApiIndex index, string endpointId)
+    private static IReadOnlyCollection<string> ReachableSchemaIdsFromEndpoint(OpenApiIndex index, string endpointId)
     {
         if (!index.Endpoints.TryGetValue(endpointId, out var endpoint))
         {
@@ -744,6 +824,26 @@ internal static class OpenApiDiffBuilder
             }
         }
 
+        WalkReachableSchemas(index, seen, queue);
+        return seen;
+    }
+
+    private static IReadOnlyCollection<string> ReachableSchemaIdsFromSchema(OpenApiIndex index, string schemaId)
+    {
+        if (!index.Schemas.ContainsKey(schemaId))
+        {
+            return [];
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal) { schemaId };
+        var queue = new Queue<string>();
+        queue.Enqueue(schemaId);
+        WalkReachableSchemas(index, seen, queue);
+        return seen;
+    }
+
+    private static void WalkReachableSchemas(OpenApiIndex index, HashSet<string> seen, Queue<string> queue)
+    {
         while (queue.Count > 0)
         {
             var schemaId = queue.Dequeue();
@@ -760,8 +860,6 @@ internal static class OpenApiDiffBuilder
                 }
             }
         }
-
-        return seen;
     }
 
     private static IEnumerable<string> SchemaEdgeIds(OpenApiIndex index, IReadOnlyCollection<string> reachableSchemaIds)
@@ -774,6 +872,25 @@ internal static class OpenApiDiffBuilder
             }
 
             foreach (var edge in outgoing.Where(edge => reachableSchemaIds.Contains(edge.TargetSchemaId)))
+            {
+                yield return GraphEdgeId(edge.SourceSchemaId, edge.Kind, edge.Label, edge.TargetSchemaId);
+            }
+        }
+    }
+
+    private static IEnumerable<string> SchemaEdgeIdsTouching(OpenApiIndex index, IReadOnlyCollection<string> reachableSchemaIds)
+    {
+        foreach (var endpoint in index.Endpoints.Values)
+        {
+            foreach (var use in endpoint.SchemaUses.Where(use => reachableSchemaIds.Contains(use.SchemaId)))
+            {
+                yield return GraphEdgeId(endpoint.Id, use.Kind, use.Label, use.SchemaId);
+            }
+        }
+
+        foreach (var edge in index.SchemaEdges.Values.SelectMany(x => x))
+        {
+            if (reachableSchemaIds.Contains(edge.SourceSchemaId) || reachableSchemaIds.Contains(edge.TargetSchemaId))
             {
                 yield return GraphEdgeId(edge.SourceSchemaId, edge.Kind, edge.Label, edge.TargetSchemaId);
             }

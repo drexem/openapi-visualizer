@@ -1,6 +1,7 @@
 const graphSettingDefaults = {
     hideEnums: true,
     hideErrorResponses: true,
+    showOnlyChanged: true,
     horizontalGap: 1.4,
     verticalGap: 1.4,
     nodeWidth: 1,
@@ -27,7 +28,7 @@ const state = {
     selected: new Map(),
     favorites: readFavoriteEndpoints(),
     detailsCollapsed: readDetailsCollapsed(),
-    collapsedSections: new Set(["endpoints", "changed", "selected"]),
+    collapsedSections: new Set(["endpoints", "changed", "affected", "selected"]),
     method: "",
     cy: null,
     lastGraph: null,
@@ -67,6 +68,9 @@ const els = {
     changedEndpointSection: document.getElementById("changedEndpointSection"),
     changedEndpointList: document.getElementById("changedEndpointList"),
     changedEndpointCount: document.getElementById("changedEndpointCount"),
+    affectedEndpointSection: document.getElementById("affectedEndpointSection"),
+    affectedEndpointList: document.getElementById("affectedEndpointList"),
+    affectedEndpointCount: document.getElementById("affectedEndpointCount"),
     selectedList: document.getElementById("selectedList"),
     selectedCount: document.getElementById("selectedCount"),
     clearSelection: document.getElementById("clearSelection"),
@@ -76,6 +80,7 @@ const els = {
     settingsPanel: document.getElementById("settingsPanel"),
     hideEnumsInput: document.getElementById("hideEnumsInput"),
     hideErrorResponsesInput: document.getElementById("hideErrorResponsesInput"),
+    showOnlyChangedInput: document.getElementById("showOnlyChangedInput"),
     horizontalGapInput: document.getElementById("horizontalGapInput"),
     horizontalGapValue: document.getElementById("horizontalGapValue"),
     verticalGapInput: document.getElementById("verticalGapInput"),
@@ -241,6 +246,7 @@ function wireEvents() {
     els.settingsPanel.addEventListener("click", event => event.stopPropagation());
     els.hideEnumsInput.addEventListener("change", updateGraph);
     els.hideErrorResponsesInput.addEventListener("change", updateGraph);
+    els.showOnlyChangedInput?.addEventListener("change", updateGraph);
     els.horizontalGapInput.addEventListener("input", updateGraphGaps);
     els.verticalGapInput.addEventListener("input", updateGraphGaps);
     els.nodeWidthInput.addEventListener("input", updateGraphSizing);
@@ -462,6 +468,9 @@ function syncGraphSizingLabels() {
 function resetGraphSettings() {
     els.hideEnumsInput.checked = graphSettingDefaults.hideEnums;
     els.hideErrorResponsesInput.checked = graphSettingDefaults.hideErrorResponses;
+    if (els.showOnlyChangedInput) {
+        els.showOnlyChangedInput.checked = graphSettingDefaults.showOnlyChanged;
+    }
     els.horizontalGapInput.value = String(graphSettingDefaults.horizontalGap);
     els.verticalGapInput.value = String(graphSettingDefaults.verticalGap);
     els.nodeWidthInput.value = String(graphSettingDefaults.nodeWidth);
@@ -583,6 +592,7 @@ function clearDiff() {
 function renderDiffControls() {
     els.compareButton?.classList.toggle("hidden", !state.specId);
     els.compareButton?.classList.toggle("danger", Boolean(state.compareSpecId));
+    els.showOnlyChangedInput?.toggleAttribute("disabled", !state.compareSpecId);
     if (els.compareLabel) {
         els.compareLabel.textContent = state.compareSpecId ? "Clear diff" : "View diff";
     }
@@ -700,8 +710,9 @@ async function applyPreparedDiff(diff) {
     state.currentDetailsNode = null;
     state.schemaCache.clear();
     state.schemaExplorerLoadErrors.clear();
-    // The changed-endpoint list is the point of a prepared diff, so open that section.
+    // The changed and affected endpoint lists are the point of a prepared diff, so open those sections.
     state.collapsedSections.delete("changed");
+    state.collapsedSections.delete("affected");
     closeSchemaExplorer();
 
     renderSectionCollapse();
@@ -856,26 +867,43 @@ function renderFavorites() {
 }
 
 function renderChangedEndpoints() {
-    if (!els.changedEndpointSection || !els.changedEndpointList || !els.changedEndpointCount) {
+    if (!els.changedEndpointSection || !els.changedEndpointList || !els.changedEndpointCount ||
+        !els.affectedEndpointSection || !els.affectedEndpointList || !els.affectedEndpointCount) {
         return;
     }
 
-    const changed = state.changedEndpoints || [];
-    els.changedEndpointSection.classList.toggle("hidden", changed.length === 0);
-    els.changedEndpointCount.textContent = changed.length.toString();
-    els.changedEndpointList.innerHTML = "";
+    const endpoints = state.changedEndpoints || [];
+    const changed = endpoints.filter(endpoint => endpoint.diffState !== "affected");
+    const affected = endpoints.filter(endpoint => endpoint.diffState === "affected");
 
-    if (changed.length === 0) {
-        els.changedEndpointList.innerHTML = `<div class="empty-list">No endpoint changes</div>`;
-        refreshIcons();
-        return;
-    }
-
-    for (const endpoint of changed) {
-        els.changedEndpointList.appendChild(createEndpointRow(endpoint));
-    }
+    renderEndpointDiffList(
+        els.changedEndpointSection,
+        els.changedEndpointList,
+        els.changedEndpointCount,
+        changed,
+        "No endpoint changes");
+    renderEndpointDiffList(
+        els.affectedEndpointSection,
+        els.affectedEndpointList,
+        els.affectedEndpointCount,
+        affected,
+        "No affected endpoints");
 
     refreshIcons();
+}
+
+function renderEndpointDiffList(section, list, count, endpoints, emptyText) {
+    section.classList.toggle("hidden", endpoints.length === 0);
+    count.textContent = endpoints.length.toString();
+    list.innerHTML = "";
+    if (endpoints.length === 0) {
+        list.innerHTML = `<div class="empty-list">${escapeHtml(emptyText)}</div>`;
+        return;
+    }
+
+    for (const endpoint of endpoints) {
+        list.appendChild(createEndpointRow(endpoint));
+    }
 }
 
 function createEndpointRow(endpoint) {
@@ -1082,6 +1110,15 @@ function initializeGraph() {
                 }
             },
             {
+                selector: "node[diffState = 'affected']",
+                style: {
+                    "border-width": 3,
+                    "border-color": "#2563eb",
+                    "border-style": "dotted",
+                    "background-color": "#dbeafe"
+                }
+            },
+            {
                 selector: "edge[diffState = 'added']",
                 style: {
                     "line-color": "#047857",
@@ -1141,7 +1178,8 @@ async function updateGraph() {
         includeProperties: true,
         allReachable,
         hideEnums: els.hideEnumsInput.checked,
-        hideErrorResponses: els.hideErrorResponsesInput.checked
+        hideErrorResponses: els.hideErrorResponsesInput.checked,
+        showOnlyChanged: Boolean(state.compareSpecId && els.showOnlyChangedInput?.checked)
     };
     if (state.compareSpecId) {
         body.compareSpecId = state.compareSpecId;
@@ -1528,6 +1566,10 @@ function diffColors(stateName) {
 
     if (stateName === "modified") {
         return { stroke: "#b45309", tint: "#fef3c7", label: "MODIFIED" };
+    }
+
+    if (stateName === "affected") {
+        return { stroke: "#2563eb", tint: "#dbeafe", label: "AFFECTED" };
     }
 
     return {};
@@ -1941,6 +1983,10 @@ function diffLabel(stateName) {
 
     if (stateName === "modified") {
         return "Modified";
+    }
+
+    if (stateName === "affected") {
+        return "Affected";
     }
 
     return "";
