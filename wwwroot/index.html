@@ -32,6 +32,36 @@
                 <input id="compareFileInput" type="file" accept=".json,application/json" hidden>
             </section>
 
+            <section class="repo-panel collapsible-section" data-section="repo" id="repoPanel" hidden>
+                <button class="section-title section-toggle" type="button" data-toggle-section="repo" aria-expanded="true">
+                    <span>Diff from repository</span>
+                    <span class="section-meta">
+                        <i data-lucide="chevron-down"></i>
+                    </span>
+                </button>
+                <div class="section-body repo-body">
+                    <select id="diffSourceSelect" class="repo-select" aria-label="Spec source"></select>
+
+                    <div class="repo-row">
+                        <input id="prInput" type="number" min="1" step="1" placeholder="Pull request number" autocomplete="off">
+                        <button id="prLoadButton" class="repo-button" type="button" title="Diff this pull request">
+                            <i data-lucide="git-pull-request-arrow"></i>
+                        </button>
+                    </div>
+
+                    <div class="repo-row repo-row-refs">
+                        <input id="baseRefInput" type="text" placeholder="base ref" autocomplete="off">
+                        <input id="headRefInput" type="text" placeholder="head ref" autocomplete="off">
+                        <button id="refLoadButton" class="repo-button" type="button" title="Diff these two refs">
+                            <i data-lucide="git-compare-arrows"></i>
+                        </button>
+                    </div>
+
+                    <p id="repoStatus" class="repo-status hidden"></p>
+                    <div id="diffProvenance" class="diff-provenance hidden"></div>
+                </div>
+            </section>
+
             <section class="search-panel">
                 <div class="search-row">
                     <div class="search-box">

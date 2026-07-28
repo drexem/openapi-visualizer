@@ -190,6 +190,153 @@ body.resizing-panels {
     display: none;
 }
 
+.repo-panel[hidden] {
+    display: none;
+}
+
+.repo-body {
+    display: grid;
+    gap: 8px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+}
+
+.repo-select,
+.repo-row input {
+    min-width: 0;
+    height: 32px;
+    padding: 0 9px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    outline: 0;
+    background: var(--panel-2);
+    color: var(--text);
+    font-size: 13px;
+    font-family: inherit;
+}
+
+.repo-select {
+    font-weight: 600;
+}
+
+.repo-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 32px;
+    align-items: center;
+    gap: 8px;
+}
+
+.repo-row-refs {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 32px;
+}
+
+.repo-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 32px;
+    border: 1px solid var(--accent);
+    border-radius: var(--radius);
+    background: #ffffff;
+    color: var(--accent);
+    cursor: pointer;
+}
+
+.repo-button:hover:not(:disabled) {
+    background: #eef6ff;
+}
+
+.repo-button svg {
+    width: 15px;
+    height: 15px;
+}
+
+.repo-button:disabled,
+.repo-row input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.repo-panel.busy .repo-body {
+    /* A cold build takes seconds; make it obvious the panel is working. */
+    opacity: 0.7;
+}
+
+.repo-status {
+    margin: 0;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.repo-status.error {
+    color: #7f1d1d;
+}
+
+.repo-status.hidden,
+.diff-provenance.hidden {
+    display: none;
+}
+
+.diff-provenance {
+    display: grid;
+    gap: 4px;
+    padding: 8px 9px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--panel-2);
+    font-size: 12px;
+    line-height: 16px;
+}
+
+.provenance-title {
+    overflow: hidden;
+    color: var(--text);
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.provenance-pair {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text);
+}
+
+.provenance-pair svg {
+    width: 13px;
+    height: 13px;
+    flex: 0 0 auto;
+    color: var(--muted);
+}
+
+.provenance-side {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    gap: 4px;
+}
+
+.provenance-label {
+    overflow: hidden;
+    max-width: 92px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.provenance-pair code {
+    padding: 1px 4px;
+    border-radius: 4px;
+    background: #ffffff;
+    color: var(--muted);
+    font-size: 11px;
+}
+
+.provenance-meta {
+    color: var(--muted);
+}
+
 .search-box {
     display: grid;
     grid-template-columns: 18px 1fr;

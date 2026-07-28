@@ -138,6 +138,12 @@ public sealed class SpecDiffSummary
     public required SpecSummary CompareSummary { get; init; }
     public required DiffCounts Counts { get; init; }
     public required IReadOnlyList<EndpointInfo> ChangedEndpoints { get; init; }
+
+    /// <summary>
+    /// Set only for diffs prepared from git refs or a pull request; null for file uploads,
+    /// where the user already knows what they picked.
+    /// </summary>
+    public DiffProvenance? Provenance { get; set; }
 }
 
 public sealed class DiffCounts
