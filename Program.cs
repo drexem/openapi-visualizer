@@ -4,11 +4,30 @@ using OpenApiVisualizer.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// Local, untracked overrides. Spec sources point at paths and hosts that are specific to whoever
+// is running the tool, so they belong here rather than in the committed appsettings.json.
+// See appsettings.Local.example.json.
+builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
+
 builder.Services.AddSingleton<OpenApiSpecStore>();
 builder.Services.Configure<FormOptions>(options =>
 {
     options.MultipartBodyLengthLimit = 250L * 1024L * 1024L;
 });
+
+builder.Services.Configure<SpecDiffOptions>(builder.Configuration.GetSection(SpecDiffOptions.SectionName));
+builder.Services.AddSingleton<SpecBundler>();
+builder.Services.AddSingleton<PullRequestResolver>();
+builder.Services.AddSingleton<SpecDiffCoordinator>();
+
+// Default credentials cover on-prem Azure DevOps Server from a domain-joined machine;
+// a PAT, when present, is applied per request and takes precedence.
+builder.Services.AddHttpClient(PullRequestResolver.HttpClientName)
+    .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
+    {
+        UseDefaultCredentials = true,
+        PreAuthenticate = true
+    });
 
 var app = builder.Build();
 
@@ -96,4 +115,59 @@ app.MapPost("/api/specs/{specId}/graph", (string specId, GraphRequest request, O
     return Results.Ok(store.BuildGraph(specId, request));
 });
 
+app.MapGet("/api/diff/sources", (SpecBundler bundler) =>
+{
+    return Results.Ok(bundler.Sources.Select(source => new
+    {
+        name = source.Name,
+        supportsPullRequests = source.Ado is not null
+    }));
+});
+
+app.MapPost("/api/diff/from-refs", async (
+    RefDiffRequest request,
+    SpecDiffCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.BaseRef) || string.IsNullOrWhiteSpace(request.HeadRef))
+    {
+        return Results.BadRequest(new { error = "Provide both baseRef and headRef." });
+    }
+
+    return await RunAsync(() => coordinator.DiffRefsAsync(
+        request.Source, request.BaseRef.Trim(), request.HeadRef.Trim(), cancellationToken));
+});
+
+app.MapPost("/api/diff/from-pr", async (
+    PullRequestDiffRequest request,
+    SpecDiffCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    if (request.PullRequestId <= 0)
+    {
+        return Results.BadRequest(new { error = "Provide a positive pullRequestId." });
+    }
+
+    return await RunAsync(() => coordinator.DiffPullRequestAsync(
+        request.Source, request.PullRequestId, cancellationToken));
+});
+
+// Build failures are expected traffic here (bad ref, unreachable server, failing merge tool),
+// so surface the message instead of a 500 with a stack trace.
+static async Task<IResult> RunAsync(Func<Task<SpecDiffSummary>> action)
+{
+    try
+    {
+        return Results.Ok(await action());
+    }
+    catch (SpecBuildException ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+}
+
 app.Run();
+
+internal sealed record RefDiffRequest(string? Source, string? BaseRef, string? HeadRef);
+
+internal sealed record PullRequestDiffRequest(string? Source, int PullRequestId);

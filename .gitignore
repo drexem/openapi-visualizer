@@ -4,3 +4,6 @@ obj/
 .vs/
 *.user
 *.suo
+
+# Local spec-source configuration: machine-specific paths and internal hostnames.
+appsettings.Local.json

@@ -47,6 +47,15 @@ const els = {
     compareButton: document.getElementById("compareButton"),
     compareLabel: document.getElementById("compareLabel"),
     compareFileInput: document.getElementById("compareFileInput"),
+    repoPanel: document.getElementById("repoPanel"),
+    diffSourceSelect: document.getElementById("diffSourceSelect"),
+    prInput: document.getElementById("prInput"),
+    prLoadButton: document.getElementById("prLoadButton"),
+    baseRefInput: document.getElementById("baseRefInput"),
+    headRefInput: document.getElementById("headRefInput"),
+    refLoadButton: document.getElementById("refLoadButton"),
+    repoStatus: document.getElementById("repoStatus"),
+    diffProvenance: document.getElementById("diffProvenance"),
     specMeta: document.getElementById("specMeta"),
     endpointSearch: document.getElementById("endpointSearch"),
     methodFiltersToggle: document.getElementById("methodFiltersToggle"),
@@ -111,6 +120,7 @@ window.addEventListener("DOMContentLoaded", () => {
     renderChangedEndpoints();
     renderDetails(null);
     refreshIcons();
+    loadDiffSources();
 });
 
 function wireEvents() {
@@ -124,6 +134,22 @@ function wireEvents() {
         els.compareFileInput?.click();
     });
     els.compareFileInput?.addEventListener("change", importComparisonSpec);
+
+    els.prLoadButton?.addEventListener("click", loadPullRequestDiff);
+    els.prInput?.addEventListener("keydown", event => {
+        if (event.key === "Enter") {
+            loadPullRequestDiff();
+        }
+    });
+    els.refLoadButton?.addEventListener("click", loadRefDiff);
+    [els.baseRefInput, els.headRefInput].forEach(input => {
+        input?.addEventListener("keydown", event => {
+            if (event.key === "Enter") {
+                loadRefDiff();
+            }
+        });
+    });
+
     els.endpointSearch.addEventListener("input", () => {
         clearTimeout(state.searchTimer);
         state.searchTimer = setTimeout(loadEndpoints, 160);
@@ -546,6 +572,7 @@ function clearDiff() {
     state.schemaExplorerLoadErrors.clear();
     closeSchemaExplorer();
     renderDiffControls();
+    renderProvenance(null);
     renderChangedEndpoints();
     renderFavorites();
     renderEndpoints();
@@ -559,6 +586,199 @@ function renderDiffControls() {
     if (els.compareLabel) {
         els.compareLabel.textContent = state.compareSpecId ? "Clear diff" : "View diff";
     }
+}
+
+async function loadDiffSources() {
+    if (!els.repoPanel || !els.diffSourceSelect) {
+        return;
+    }
+
+    let sources = [];
+    try {
+        const response = await fetch("/api/diff/sources");
+        sources = response.ok ? await response.json() : [];
+    } catch (error) {
+        console.error(error);
+    }
+
+    // The panel only makes sense when the server has repositories configured.
+    if (sources.length === 0) {
+        els.repoPanel.hidden = true;
+        return;
+    }
+
+    els.diffSourceSelect.innerHTML = "";
+    for (const source of sources) {
+        const option = document.createElement("option");
+        option.value = source.name;
+        option.textContent = source.name;
+        option.dataset.supportsPullRequests = String(source.supportsPullRequests);
+        els.diffSourceSelect.appendChild(option);
+    }
+
+    els.repoPanel.hidden = false;
+    els.diffSourceSelect.addEventListener("change", renderRepoSourceCapabilities);
+    renderRepoSourceCapabilities();
+    refreshIcons();
+}
+
+function renderRepoSourceCapabilities() {
+    const option = els.diffSourceSelect?.selectedOptions?.[0];
+    const supportsPullRequests = option?.dataset.supportsPullRequests !== "false";
+    els.prInput?.toggleAttribute("disabled", !supportsPullRequests);
+    els.prLoadButton?.toggleAttribute("disabled", !supportsPullRequests);
+    if (els.prInput) {
+        els.prInput.placeholder = supportsPullRequests
+            ? "Pull request number"
+            : "No Azure DevOps configured";
+    }
+}
+
+function loadPullRequestDiff() {
+    const pullRequestId = Number.parseInt(els.prInput?.value ?? "", 10);
+    if (!Number.isInteger(pullRequestId) || pullRequestId <= 0) {
+        setRepoStatus("Enter a pull request number.", true);
+        return;
+    }
+
+    return requestRepoDiff("/api/diff/from-pr", {
+        source: els.diffSourceSelect?.value,
+        pullRequestId
+    }, `Preparing PR ${pullRequestId}`);
+}
+
+function loadRefDiff() {
+    const baseRef = els.baseRefInput?.value.trim();
+    const headRef = els.headRefInput?.value.trim();
+    if (!baseRef || !headRef) {
+        setRepoStatus("Enter both a base ref and a head ref.", true);
+        return;
+    }
+
+    return requestRepoDiff("/api/diff/from-refs", {
+        source: els.diffSourceSelect?.value,
+        baseRef,
+        headRef
+    }, `Comparing ${baseRef} to ${headRef}`);
+}
+
+async function requestRepoDiff(url, body, busyLabel) {
+    setRepoBusy(true);
+    // A cold build clones nothing but does bundle thousands of files, so say what is happening.
+    setRepoStatus(`${busyLabel} - building specs, this can take a while on first use.`, false);
+    setStatus(busyLabel);
+
+    try {
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+        });
+
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(payload?.error || `Request failed with status ${response.status}`);
+        }
+
+        await applyPreparedDiff(payload);
+        setRepoStatus("", false);
+        setStatus("Diff ready");
+    } catch (error) {
+        console.error(error);
+        setRepoStatus(error.message || "Failed to prepare the diff.", true);
+        setStatus("Diff failed");
+    } finally {
+        setRepoBusy(false);
+    }
+}
+
+async function applyPreparedDiff(diff) {
+    state.specId = diff.baseSpecId;
+    state.compareSpecId = diff.compareSpecId;
+    state.changedEndpoints = diff.changedEndpoints || [];
+    state.selected.clear();
+    state.currentDetailsNode = null;
+    state.schemaCache.clear();
+    state.schemaExplorerLoadErrors.clear();
+    // The changed-endpoint list is the point of a prepared diff, so open that section.
+    state.collapsedSections.delete("changed");
+    closeSchemaExplorer();
+
+    renderSectionCollapse();
+    renderDiffControls();
+    renderProvenance(diff.provenance);
+    renderSpecMeta(diff.provenance?.baseSummary || diff.compareSummary);
+    if (els.fileLabel) {
+        els.fileLabel.textContent = diff.provenance?.sourceName || "Load JSON spec";
+    }
+
+    await loadAllEndpoints();
+    await loadEndpoints();
+    renderChangedEndpoints();
+    renderSelected();
+    updateGraph();
+}
+
+function setRepoBusy(busy) {
+    els.prLoadButton?.toggleAttribute("disabled", busy);
+    els.refLoadButton?.toggleAttribute("disabled", busy);
+    els.repoPanel?.classList.toggle("busy", busy);
+    if (!busy) {
+        renderRepoSourceCapabilities();
+    }
+}
+
+function setRepoStatus(message, isError) {
+    if (!els.repoStatus) {
+        return;
+    }
+
+    els.repoStatus.textContent = message || "";
+    els.repoStatus.classList.toggle("hidden", !message);
+    els.repoStatus.classList.toggle("error", Boolean(isError));
+}
+
+function renderProvenance(provenance) {
+    if (!els.diffProvenance) {
+        return;
+    }
+
+    if (!provenance) {
+        els.diffProvenance.innerHTML = "";
+        els.diffProvenance.classList.add("hidden");
+        return;
+    }
+
+    const short = commit => String(commit ?? "").slice(0, 8);
+    const rows = [];
+
+    if (provenance.pullRequestId) {
+        rows.push(`<div class="provenance-title">PR ${provenance.pullRequestId}: ${escapeHtml(provenance.pullRequestTitle)}</div>`);
+    }
+
+    rows.push(`
+        <div class="provenance-pair">
+            <span class="provenance-side">
+                <span class="provenance-label">${escapeHtml(provenance.baseLabel)}</span>
+                <code>${short(provenance.baseCommit)}</code>
+            </span>
+            <i data-lucide="arrow-right"></i>
+            <span class="provenance-side">
+                <span class="provenance-label">${escapeHtml(provenance.headLabel)}</span>
+                <code>${short(provenance.headCommit)}</code>
+            </span>
+        </div>`);
+
+    const cached = provenance.baseFromCache && provenance.headFromCache
+        ? "cached"
+        : provenance.baseFromCache || provenance.headFromCache
+            ? "partly cached"
+            : "freshly built";
+    rows.push(`<div class="provenance-meta">${escapeHtml(provenance.baseStrategy)} &middot; ${cached} in ${provenance.prepareSeconds}s</div>`);
+
+    els.diffProvenance.innerHTML = rows.join("");
+    els.diffProvenance.classList.remove("hidden");
+    refreshIcons();
 }
 
 function renderSpecMeta(summary) {
