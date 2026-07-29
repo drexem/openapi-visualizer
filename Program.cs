@@ -106,6 +106,21 @@ app.MapGet("/api/specs/{specId}/models", (
     return Results.Ok(store.SearchSchemas(specId, query, limit ?? 100));
 });
 
+app.MapGet("/api/specs/{specId}/models/similar", (
+    string specId,
+    string? schemaId,
+    string? compareSpecId,
+    int? limit,
+    OpenApiSpecStore store) =>
+{
+    if (string.IsNullOrWhiteSpace(schemaId))
+    {
+        return Results.BadRequest(new { error = "Provide a schemaId query parameter." });
+    }
+
+    return Results.Ok(store.FindSimilarSchemas(specId, schemaId, limit ?? 5, compareSpecId));
+});
+
 app.MapGet("/api/specs/{specId}/schemas", (string specId, string? schemaId, string? compareSpecId, OpenApiSpecStore store) =>
 {
     if (string.IsNullOrWhiteSpace(schemaId))

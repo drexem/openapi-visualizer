@@ -108,6 +108,24 @@ public sealed class OpenApiSpecStore
             .ToArray();
     }
 
+    public IReadOnlyList<SimilarSchemaInfo> FindSimilarSchemas(string specId, string schemaIdOrName, int limit, string? compareSpecId)
+    {
+        if (!_specs.TryGetValue(specId, out var baseIndex))
+        {
+            return [];
+        }
+
+        var index = baseIndex;
+        if (!string.IsNullOrWhiteSpace(compareSpecId) &&
+            _specs.TryGetValue(compareSpecId, out var compareIndex) &&
+            compareIndex.GetSchema(schemaIdOrName) is not null)
+        {
+            index = compareIndex;
+        }
+
+        return index.FindSimilarSchemas(schemaIdOrName, limit);
+    }
+
     public SchemaInfo? GetSchema(string specId, string schemaIdOrName)
     {
         return _specs.TryGetValue(specId, out var index)
@@ -187,6 +205,185 @@ internal sealed class OpenApiIndex
             : $"schema:{schemaIdOrName}";
 
         return Schemas.TryGetValue(schemaId, out var schema) ? schema : null;
+    }
+
+    public IReadOnlyList<SimilarSchemaInfo> FindSimilarSchemas(string schemaIdOrName, int limit)
+    {
+        var source = GetSchema(schemaIdOrName);
+        if (source is null)
+        {
+            return [];
+        }
+
+        return Schemas.Values
+            .Where(schema => !string.Equals(schema.Id, source.Id, StringComparison.Ordinal))
+            .Select(schema => ScoreSimilarity(source, schema))
+            .Where(result => result.Score > 0)
+            .OrderByDescending(result => result.Score)
+            .ThenByDescending(result => result.SharedPropertyCount)
+            .ThenBy(result => result.Schema.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(Math.Clamp(limit, 1, 25))
+            .ToArray();
+    }
+
+    private static SimilarSchemaInfo ScoreSimilarity(SchemaInfo source, SchemaInfo candidate)
+    {
+        var sourcePropertyNames = PropertyNameSet(source);
+        var candidatePropertyNames = PropertyNameSet(candidate);
+        var sourcePropertySignatures = PropertySignatureSet(source);
+        var candidatePropertySignatures = PropertySignatureSet(candidate);
+        var sourceReferenceNames = PropertyReferenceSet(source);
+        var candidateReferenceNames = PropertyReferenceSet(candidate);
+
+        var propertyNameScore = Jaccard(sourcePropertyNames, candidatePropertyNames);
+        var propertySignatureScore = Jaccard(sourcePropertySignatures, candidatePropertySignatures);
+        var referenceScore = Jaccard(sourceReferenceNames, candidateReferenceNames);
+        var typeScore = string.Equals(source.Type ?? "", candidate.Type ?? "", StringComparison.OrdinalIgnoreCase) ? 1d : 0d;
+        var enumScore = source.EnumValues.Count == 0 && candidate.EnumValues.Count == 0
+            ? 0d
+            : Jaccard(source.EnumValues.ToHashSet(StringComparer.OrdinalIgnoreCase), candidate.EnumValues.ToHashSet(StringComparer.OrdinalIgnoreCase));
+        var nameTokenScore = Jaccard(NameTokens(source.Name), NameTokens(candidate.Name));
+
+        var score =
+            propertyNameScore * 0.34d +
+            propertySignatureScore * 0.34d +
+            referenceScore * 0.12d +
+            typeScore * 0.08d +
+            enumScore * 0.07d +
+            nameTokenScore * 0.05d;
+        var sharedPropertyCount = sourcePropertyNames.Intersect(candidatePropertyNames, StringComparer.OrdinalIgnoreCase).Count();
+        var totalPropertyCount = sourcePropertyNames.Union(candidatePropertyNames, StringComparer.OrdinalIgnoreCase).Count();
+
+        return new SimilarSchemaInfo
+        {
+            Schema = candidate,
+            Score = Math.Round(score, 4),
+            SharedPropertyCount = sharedPropertyCount,
+            TotalPropertyCount = totalPropertyCount,
+            Reasons = SimilarityReasons(
+                source,
+                candidate,
+                propertyNameScore,
+                propertySignatureScore,
+                referenceScore,
+                typeScore,
+                sharedPropertyCount,
+                totalPropertyCount)
+        };
+    }
+
+    private static IReadOnlyList<string> SimilarityReasons(
+        SchemaInfo source,
+        SchemaInfo candidate,
+        double propertyNameScore,
+        double propertySignatureScore,
+        double referenceScore,
+        double typeScore,
+        int sharedPropertyCount,
+        int totalPropertyCount)
+    {
+        var reasons = new List<string>();
+        if (sharedPropertyCount > 0)
+        {
+            reasons.Add($"{sharedPropertyCount}/{Math.Max(totalPropertyCount, 1)} shared properties");
+        }
+        if (propertySignatureScore >= 0.45d)
+        {
+            reasons.Add("similar property types");
+        }
+        if (referenceScore >= 0.35d)
+        {
+            reasons.Add("shared referenced models");
+        }
+        if (typeScore > 0d && !string.IsNullOrWhiteSpace(source.Type))
+        {
+            reasons.Add($"same {source.Type} type");
+        }
+        if (NameTokens(source.Name).Overlaps(NameTokens(candidate.Name)))
+        {
+            reasons.Add("similar name tokens");
+        }
+        if (reasons.Count == 0 && propertyNameScore > 0d)
+        {
+            reasons.Add("partial property overlap");
+        }
+
+        return reasons.Take(4).ToArray();
+    }
+
+    private static HashSet<string> PropertyNameSet(SchemaInfo schema)
+    {
+        return schema.Properties
+            .Select(property => property.Name)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static HashSet<string> PropertySignatureSet(SchemaInfo schema)
+    {
+        return schema.Properties
+            .Select(PropertySimilaritySignature)
+            .Where(signature => !string.IsNullOrWhiteSpace(signature))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static HashSet<string> PropertyReferenceSet(SchemaInfo schema)
+    {
+        return schema.Properties
+            .Select(property => property.ItemsRefId ?? property.RefId)
+            .Where(reference => !string.IsNullOrWhiteSpace(reference))
+            .Select(reference => StripSchemaPrefix(reference!))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string PropertySimilaritySignature(SchemaPropertyInfo property)
+    {
+        var type = property.ItemsRefId is not null
+            ? $"{StripSchemaPrefix(property.ItemsRefId)}[]"
+            : property.RefId is not null
+                ? StripSchemaPrefix(property.RefId)
+                : string.Join(":", new[] { property.Type, property.Format }.Where(value => !string.IsNullOrWhiteSpace(value)));
+        var required = property.Required ? "required" : "optional";
+        var nullable = property.Nullable ? "nullable" : "not-nullable";
+        return $"{property.Name}:{type}:{required}:{nullable}";
+    }
+
+    private static HashSet<string> NameTokens(string name)
+    {
+        var normalized = new StringBuilder(name.Length + 8);
+        for (var index = 0; index < name.Length; index++)
+        {
+            var ch = name[index];
+            if (index > 0 && char.IsUpper(ch) && char.IsLower(name[index - 1]))
+            {
+                normalized.Append(' ');
+            }
+
+            normalized.Append(char.IsLetterOrDigit(ch) ? char.ToLowerInvariant(ch) : ' ');
+        }
+
+        return normalized
+            .ToString()
+            .Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(token => token.Length > 2)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static double Jaccard(IReadOnlySet<string> first, IReadOnlySet<string> second)
+    {
+        if (first.Count == 0 && second.Count == 0)
+        {
+            return 0d;
+        }
+
+        var intersection = first.Intersect(second, StringComparer.OrdinalIgnoreCase).Count();
+        var union = first.Union(second, StringComparer.OrdinalIgnoreCase).Count();
+        return union == 0 ? 0d : (double)intersection / union;
+    }
+
+    private static string StripSchemaPrefix(string value)
+    {
+        return value.StartsWith("schema:", StringComparison.Ordinal) ? value["schema:".Length..] : value;
     }
 
     public GraphResponse BuildGraph(GraphRequest request)

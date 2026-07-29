@@ -44,7 +44,8 @@ const state = {
     schemaExplorerLoadErrors: new Set(),
     schemaExplorerRootId: null,
     schemaExplorerExpanded: new Set(),
-    schemaExplorerRows: new Map()
+    schemaExplorerRows: new Map(),
+    similarModelsTarget: null
 };
 
 const els = {
@@ -122,6 +123,11 @@ const els = {
     schemaExplorerTitle: document.getElementById("schemaExplorerTitle"),
     schemaExplorerBadge: document.getElementById("schemaExplorerBadge"),
     schemaExplorerBody: document.getElementById("schemaExplorerBody"),
+    similarModelsOverlay: document.getElementById("similarModelsOverlay"),
+    similarModelsCloseButton: document.getElementById("similarModelsCloseButton"),
+    similarModelsTitle: document.getElementById("similarModelsTitle"),
+    similarModelsBadge: document.getElementById("similarModelsBadge"),
+    similarModelsBody: document.getElementById("similarModelsBody"),
     resizeHandles: document.querySelectorAll("[data-resize-panel]")
 };
 
@@ -227,12 +233,17 @@ function wireEvents() {
         }
 
         const button = event.target.closest("[data-open-schema-explorer]");
-        if (!button || !state.currentDetailsNode) {
+        if (button && state.currentDetailsNode) {
+            event.preventDefault();
+            openSchemaExplorer(state.currentDetailsNode);
             return;
         }
 
-        event.preventDefault();
-        openSchemaExplorer(state.currentDetailsNode);
+        const similarButton = event.target.closest("[data-open-similar-models]");
+        if (similarButton && state.currentDetailsNode) {
+            event.preventDefault();
+            openSimilarModelsOverlay(state.currentDetailsNode);
+        }
     });
     els.schemaExplorerCloseButton?.addEventListener("click", closeSchemaExplorer);
     els.schemaExplorerOverlay?.addEventListener("click", event => {
@@ -248,6 +259,21 @@ function wireEvents() {
 
         event.preventDefault();
         toggleSchemaExplorerRow(toggle.dataset.schemaToggle);
+    });
+    els.similarModelsCloseButton?.addEventListener("click", closeSimilarModelsOverlay);
+    els.similarModelsOverlay?.addEventListener("click", event => {
+        if (event.target === els.similarModelsOverlay) {
+            closeSimilarModelsOverlay();
+        }
+    });
+    els.similarModelsBody?.addEventListener("click", event => {
+        const button = event.target.closest("[data-open-similar-schema]");
+        if (!button) {
+            return;
+        }
+
+        event.preventDefault();
+        openSimilarSchema(button.dataset.openSimilarSchema);
     });
 
     els.clearSelection.addEventListener("click", () => {
@@ -284,6 +310,11 @@ function wireEvents() {
     document.addEventListener("keydown", handleGraphKeyboardShortcut);
     document.addEventListener("keydown", event => {
         if (event.key === "Escape") {
+            if (!els.similarModelsOverlay?.classList.contains("hidden")) {
+                closeSimilarModelsOverlay();
+                return;
+            }
+
             if (!els.schemaExplorerOverlay?.classList.contains("hidden")) {
                 closeSchemaExplorer();
                 return;
@@ -415,7 +446,7 @@ function handleGraphKeyboardShortcut(event) {
     }
 
     const key = event.key.toLowerCase();
-    if (key !== "i" && key !== "o") {
+    if (key !== "i" && key !== "o" && key !== "s") {
         return;
     }
 
@@ -428,8 +459,10 @@ function handleGraphKeyboardShortcut(event) {
     event.preventDefault();
     if (key === "i") {
         loadIncomingGraph(data);
-    } else {
+    } else if (key === "o") {
         loadOutgoingGraph(data);
+    } else {
+        openSimilarModelsOverlay(data);
     }
 }
 
@@ -2147,10 +2180,16 @@ function renderSchemaExplorerAction(data) {
     }
 
     return `
-        <button class="schema-explorer-button" type="button" data-open-schema-explorer>
-            <i data-lucide="list-tree"></i>
-            <span>Even more details!</span>
-        </button>
+        <div class="schema-action-row">
+            <button class="schema-explorer-button" type="button" data-open-schema-explorer>
+                <i data-lucide="list-tree"></i>
+                <span>Model details</span>
+            </button>
+            <button class="schema-explorer-button secondary" type="button" data-open-similar-models>
+                <i data-lucide="scan-search"></i>
+                <span>Similar models</span>
+            </button>
+        </div>
     `;
 }
 
@@ -2455,6 +2494,96 @@ async function loadSchema(schemaId) {
     const schema = normalizeSchema(await response.json(), true);
     state.schemaCache.set(schema.id, schema);
     return schema;
+}
+
+async function openSimilarModelsOverlay(data) {
+    if (!state.specId || !isSchemaNode(data)) {
+        setStatus("Similar models are available for model nodes");
+        return;
+    }
+
+    const target = normalizeSchema(data);
+    state.similarModelsTarget = target;
+    els.similarModelsTitle.textContent = "Similar models";
+    els.similarModelsBadge.textContent = target.label;
+    els.similarModelsOverlay?.classList.remove("hidden");
+    document.body.classList.add("similar-models-open");
+    els.similarModelsBody.innerHTML = `<div class="similar-models-message">Finding similar models</div>`;
+    setStatus(`Finding similar models for ${target.label}`);
+
+    try {
+        const params = new URLSearchParams({
+            schemaId: target.id,
+            limit: "5"
+        });
+        if (state.compareSpecId) {
+            params.set("compareSpecId", state.compareSpecId);
+        }
+
+        const response = await fetch(`/api/specs/${state.specId}/models/similar?${params}`);
+        if (!response.ok) {
+            throw new Error(await response.text());
+        }
+
+        renderSimilarModels(await response.json());
+        setStatus("Similar models ready");
+    } catch (error) {
+        console.error(error);
+        els.similarModelsBody.innerHTML = `<div class="similar-models-message error">Could not load similar models</div>`;
+        setStatus("Similar models failed");
+    }
+}
+
+function closeSimilarModelsOverlay() {
+    els.similarModelsOverlay?.classList.add("hidden");
+    document.body.classList.remove("similar-models-open");
+    state.similarModelsTarget = null;
+}
+
+function renderSimilarModels(results) {
+    const items = Array.isArray(results) ? results : [];
+    if (items.length === 0) {
+        els.similarModelsBody.innerHTML = `<div class="similar-models-message">No similar models found</div>`;
+        return;
+    }
+
+    els.similarModelsBody.innerHTML = `
+        <div class="similar-model-list">
+            ${items.map(renderSimilarModelResult).join("")}
+        </div>
+    `;
+}
+
+function renderSimilarModelResult(result) {
+    const schema = normalizeSchema(result.schema || {});
+    const score = Math.round((Number(result.score) || 0) * 100);
+    const shared = Number(result.sharedPropertyCount) || 0;
+    const total = Number(result.totalPropertyCount) || 0;
+    const reasons = Array.isArray(result.reasons) ? result.reasons : [];
+    return `
+        <button class="similar-model-result" type="button" data-open-similar-schema="${escapeHtml(schema.id)}">
+            <span class="similar-model-score">${score}</span>
+            <span class="similar-model-main">
+                <span class="similar-model-name">${escapeHtml(schema.label)}</span>
+                <span class="similar-model-meta">${escapeHtml(schema.subtitle || "")}</span>
+                <span class="similar-model-reasons">
+                    <span>${escapeHtml(`${shared}/${Math.max(total, 1)} properties`)}</span>
+                    ${reasons.map(reason => `<span>${escapeHtml(reason)}</span>`).join("")}
+                </span>
+            </span>
+            <i data-lucide="chevron-right"></i>
+        </button>
+    `;
+}
+
+async function openSimilarSchema(schemaId) {
+    if (!schemaId) {
+        return;
+    }
+
+    closeSimilarModelsOverlay();
+    const cached = state.schemaCache.get(schemaId);
+    openSchemaExplorer(cached || { id: schemaId, kind: "schema", label: stripSchemaPrefix(schemaId) });
 }
 
 function renderSchemaExplorer() {

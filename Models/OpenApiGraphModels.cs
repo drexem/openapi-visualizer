@@ -65,6 +65,15 @@ public sealed class SchemaPropertyInfo
     public bool? PreviousRequired { get; init; }
 }
 
+public sealed class SimilarSchemaInfo
+{
+    public required SchemaInfo Schema { get; init; }
+    public required double Score { get; init; }
+    public required int SharedPropertyCount { get; init; }
+    public required int TotalPropertyCount { get; init; }
+    public IReadOnlyList<string> Reasons { get; init; } = [];
+}
+
 public sealed class SchemaEdge
 {
     public required string SourceSchemaId { get; init; }

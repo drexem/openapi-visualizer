@@ -1396,6 +1396,12 @@ body.resizing-panels {
     padding: 14px 16px;
 }
 
+.schema-action-row {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+}
+
 .schema-explorer-button {
     display: inline-flex;
     align-items: center;
@@ -1414,6 +1420,15 @@ body.resizing-panels {
 
 .schema-explorer-button:hover {
     background: #1b2a21;
+}
+
+.schema-explorer-button.secondary {
+    background: #ffffff;
+    color: var(--text);
+}
+
+.schema-explorer-button.secondary:hover {
+    background: #dbeafe;
 }
 
 .schema-explorer-button svg {
@@ -1601,8 +1616,19 @@ body.resizing-panels {
     background: rgba(35, 54, 43, 0.42);
 }
 
-.schema-explorer-overlay.hidden {
+.schema-explorer-overlay.hidden,
+.similar-models-overlay.hidden {
     display: none;
+}
+
+.similar-models-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 105;
+    display: grid;
+    place-items: center;
+    padding: 28px;
+    background: rgba(35, 54, 43, 0.42);
 }
 
 .schema-explorer-dialog {
@@ -1618,7 +1644,21 @@ body.resizing-panels {
     box-shadow: var(--shadow);
 }
 
-.schema-explorer-header {
+.similar-models-dialog {
+    display: flex;
+    width: min(620px, calc(100vw - 56px));
+    max-height: min(640px, calc(100vh - 56px));
+    min-height: 260px;
+    flex-direction: column;
+    overflow: hidden;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: #ffffff;
+    box-shadow: var(--shadow);
+}
+
+.schema-explorer-header,
+.similar-models-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -1653,11 +1693,135 @@ body.resizing-panels {
     white-space: nowrap;
 }
 
+#similarModelsBadge {
+    display: block;
+    max-width: 500px;
+    overflow: hidden;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 18px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
 .schema-explorer-body {
     min-height: 0;
     overflow: auto;
     padding: 18px;
     background: #efeeea;
+}
+
+.similar-models-body {
+    min-height: 0;
+    overflow: auto;
+    padding: 14px;
+    background: #efeeea;
+}
+
+.similar-model-list {
+    display: grid;
+    gap: 8px;
+}
+
+.similar-model-result {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr) 18px;
+    align-items: start;
+    gap: 10px;
+    width: 100%;
+    padding: 10px 12px;
+    border: 1.5px solid var(--line);
+    border-left: 5px solid var(--accent);
+    border-radius: 6px;
+    background: #ffffff;
+    color: var(--text);
+    text-align: left;
+}
+
+.similar-model-result:hover {
+    border-color: var(--accent);
+    background: #f8fafc;
+}
+
+.similar-model-result svg {
+    width: 16px;
+    height: 16px;
+    margin-top: 4px;
+    color: var(--muted);
+}
+
+.similar-model-score {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 38px;
+    min-height: 28px;
+    border-radius: 6px;
+    background: #23362b;
+    color: #ffffff;
+    font-size: 12px;
+    font-weight: 850;
+}
+
+.similar-model-main {
+    min-width: 0;
+}
+
+.similar-model-name {
+    display: block;
+    overflow: hidden;
+    font-size: 13px;
+    font-weight: 850;
+    line-height: 18px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.similar-model-meta {
+    display: block;
+    overflow: hidden;
+    margin-top: 2px;
+    color: var(--muted);
+    font-size: 12px;
+    line-height: 16px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.similar-model-reasons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 5px;
+    margin-top: 7px;
+}
+
+.similar-model-reasons span {
+    max-width: 100%;
+    overflow: hidden;
+    padding: 2px 6px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: #efeeea;
+    color: var(--text);
+    font-size: 11px;
+    font-weight: 750;
+    line-height: 15px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.similar-models-message {
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #ffffff;
+    color: var(--muted);
+    font-size: 13px;
+}
+
+.similar-models-message.error {
+    border-color: #e86a58;
+    color: #7f1d1d;
 }
 
 .schema-tree-message,
