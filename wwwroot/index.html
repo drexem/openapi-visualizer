@@ -66,7 +66,7 @@
                 <div class="search-row">
                     <div class="search-box">
                         <i data-lucide="search"></i>
-                        <input id="endpointSearch" type="search" placeholder="Search endpoints" autocomplete="off">
+                        <input id="endpointSearch" type="search" placeholder="Search endpoints or models" autocomplete="off">
                     </div>
                     <button id="methodFiltersToggle" class="icon-button filter-toggle collapsed" title="Show method filters" aria-label="Show method filters" aria-expanded="false">
                         <i data-lucide="chevron-down"></i>
@@ -102,6 +102,24 @@
                     </span>
                 </button>
                 <div id="endpointList" class="endpoint-list section-body"></div>
+            </section>
+
+            <section class="model-section collapsible-section" data-section="models">
+                <button class="section-title section-toggle" type="button" data-toggle-section="models" aria-expanded="true">
+                    <span>Models</span>
+                    <span class="section-meta">
+                        <span id="modelCount">0</span>
+                        <i data-lucide="chevron-down"></i>
+                    </span>
+                </button>
+                <div class="section-body model-browser">
+                    <div class="model-tabs" role="tablist" aria-label="Model browser">
+                        <button class="model-tab active" type="button" data-model-tab="all">Models</button>
+                        <button class="model-tab" type="button" data-model-tab="changed">Changed</button>
+                        <button class="model-tab" type="button" data-model-tab="affected">Affected</button>
+                    </div>
+                    <div id="modelList" class="model-list"></div>
+                </div>
             </section>
 
             <section id="changedEndpointSection" class="changed-section collapsible-section hidden" data-section="changed">
@@ -167,6 +185,10 @@
                 <button id="fitButton" class="tool-button" title="Fit graph">
                     <i data-lucide="maximize"></i>
                     <span>Fit</span>
+                </button>
+                <button id="showChangesButton" class="tool-button hidden" title="Show all changed and affected endpoints and models">
+                    <i data-lucide="list-plus"></i>
+                    <span>Changes</span>
                 </button>
                 <div class="status-pill" id="graphStatus">Idle</div>
                 <div class="settings-menu">

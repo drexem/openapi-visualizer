@@ -62,6 +62,7 @@ public sealed class SchemaPropertyInfo
     public IReadOnlyList<string> EnumValues { get; init; } = [];
     public string? DiffState { get; init; }
     public string? PreviousType { get; init; }
+    public bool? PreviousRequired { get; init; }
 }
 
 public sealed class SchemaEdge
@@ -81,6 +82,9 @@ public sealed class CycleInfo
 public sealed class GraphRequest
 {
     public IReadOnlyList<string> EndpointIds { get; init; } = [];
+    public IReadOnlyList<string> SchemaIds { get; init; } = [];
+    public string? IncomingSchemaId { get; init; }
+    public string? OutgoingSchemaId { get; init; }
     public string? CompareSpecId { get; init; }
     public int Depth { get; init; } = 2;
     public int MaxNodes { get; init; } = 250;
@@ -139,6 +143,8 @@ public sealed class SpecDiffSummary
     public required SpecSummary CompareSummary { get; init; }
     public required DiffCounts Counts { get; init; }
     public required IReadOnlyList<EndpointInfo> ChangedEndpoints { get; init; }
+    public IReadOnlyList<SchemaInfo> ChangedSchemas { get; init; } = [];
+    public IReadOnlyList<SchemaInfo> AffectedSchemas { get; init; } = [];
 
     /// <summary>
     /// Set only for diffs prepared from git refs or a pull request; null for file uploads,

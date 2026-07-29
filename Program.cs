@@ -97,6 +97,15 @@ app.MapGet("/api/specs/{specId}/endpoints", (
     return Results.Ok(store.SearchEndpoints(specId, query, method, limit ?? 100));
 });
 
+app.MapGet("/api/specs/{specId}/models", (
+    string specId,
+    string? query,
+    int? limit,
+    OpenApiSpecStore store) =>
+{
+    return Results.Ok(store.SearchSchemas(specId, query, limit ?? 100));
+});
+
 app.MapGet("/api/specs/{specId}/schemas", (string specId, string? schemaId, string? compareSpecId, OpenApiSpecStore store) =>
 {
     if (string.IsNullOrWhiteSpace(schemaId))

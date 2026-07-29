@@ -89,6 +89,25 @@ public sealed class OpenApiSpecStore
             .ToArray();
     }
 
+    public IReadOnlyList<SchemaInfo> SearchSchemas(string specId, string? query, int limit)
+    {
+        if (!_specs.TryGetValue(specId, out var index))
+        {
+            return [];
+        }
+
+        var normalizedQuery = query?.Trim();
+        return index.Schemas.Values
+            .Where(schema => string.IsNullOrWhiteSpace(normalizedQuery) ||
+                             schema.Id.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ||
+                             schema.Name.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ||
+                             (schema.Description?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                             schema.Properties.Any(property => property.Name.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase)))
+            .OrderBy(schema => schema.Name, StringComparer.OrdinalIgnoreCase)
+            .Take(Math.Clamp(limit, 1, 500))
+            .ToArray();
+    }
+
     public SchemaInfo? GetSchema(string specId, string schemaIdOrName)
     {
         return _specs.TryGetValue(specId, out var index)
@@ -173,32 +192,66 @@ internal sealed class OpenApiIndex
     public GraphResponse BuildGraph(GraphRequest request)
     {
         var warnings = new List<string>();
+        if (!string.IsNullOrWhiteSpace(request.IncomingSchemaId))
+        {
+            return BuildIncomingGraph(request);
+        }
+        if (!string.IsNullOrWhiteSpace(request.OutgoingSchemaId))
+        {
+            return BuildOutgoingGraph(request);
+        }
+
+        var maxNodes = Math.Clamp(request.MaxNodes, 25, 1_000);
         var selectedEndpointIds = request.EndpointIds
             .Where(Endpoints.ContainsKey)
             .Distinct(StringComparer.Ordinal)
-            .Take(25)
+            .ToArray();
+        var selectedSchemaIds = request.SchemaIds
+            .Where(Schemas.ContainsKey)
+            .Distinct(StringComparer.Ordinal)
             .ToArray();
 
-        if (selectedEndpointIds.Length == 0)
+        if (selectedEndpointIds.Length == 0 && selectedSchemaIds.Length == 0)
         {
             return new GraphResponse
             {
                 Nodes = [],
                 Edges = [],
                 Cycles = [],
-                Warnings = ["Select at least one endpoint to visualize."]
+                Warnings = ["Select endpoints or models to visualize."]
             };
         }
 
         var depth = request.AllReachable ? int.MaxValue : Math.Clamp(request.Depth, 0, 8);
-        var maxNodes = Math.Clamp(request.MaxNodes, 25, 1_000);
         var nodes = new Dictionary<string, GraphNode>(StringComparer.Ordinal);
         var edges = new Dictionary<string, GraphEdge>(StringComparer.Ordinal);
         var schemaDepth = new Dictionary<string, int>(StringComparer.Ordinal);
         var queue = new Queue<(string SchemaId, int Depth)>();
 
+        foreach (var schemaId in selectedSchemaIds)
+        {
+            AddSchemaNode(schemaId);
+            if (!schemaDepth.TryGetValue(schemaId, out var knownDepth) || knownDepth > 0)
+            {
+                schemaDepth[schemaId] = 0;
+                queue.Enqueue((schemaId, 0));
+            }
+
+            if (nodes.Count >= maxNodes)
+            {
+                warnings.Add($"Graph was capped at {maxNodes} nodes. Increase the node limit or select fewer roots.");
+                break;
+            }
+        }
+
         foreach (var endpointId in selectedEndpointIds)
         {
+            if (nodes.Count >= maxNodes)
+            {
+                warnings.Add($"Graph was capped at {maxNodes} nodes. Increase the node limit or filter selected roots.");
+                break;
+            }
+
             var endpoint = Endpoints[endpointId];
             nodes[endpoint.Id] = new GraphNode
             {
@@ -348,17 +401,370 @@ internal sealed class OpenApiIndex
                    (!request.HideEnums || schema.EnumValues.Count == 0);
         }
 
-        static bool IsErrorResponseUse(EndpointSchemaUse schemaUse)
+    }
+
+    private GraphResponse BuildIncomingGraph(GraphRequest request)
+    {
+        var warnings = new List<string>();
+        var rootSchemaId = request.IncomingSchemaId!.StartsWith("schema:", StringComparison.Ordinal)
+            ? request.IncomingSchemaId
+            : $"schema:{request.IncomingSchemaId}";
+
+        if (!Schemas.ContainsKey(rootSchemaId))
         {
-            if (!string.Equals(schemaUse.Kind, "ResponseBody", StringComparison.OrdinalIgnoreCase))
+            return new GraphResponse
             {
-                return false;
+                Nodes = [],
+                Edges = [],
+                Cycles = [],
+                Warnings = [$"Model '{request.IncomingSchemaId}' was not found."]
+            };
+        }
+
+        var depth = request.AllReachable ? int.MaxValue : Math.Clamp(request.Depth, 0, 8);
+        var maxNodes = Math.Clamp(request.MaxNodes, 25, 1_000);
+        var nodes = new Dictionary<string, GraphNode>(StringComparer.Ordinal);
+        var edges = new Dictionary<string, GraphEdge>(StringComparer.Ordinal);
+        var schemaDepth = new Dictionary<string, int>(StringComparer.Ordinal) { [rootSchemaId] = 0 };
+        var queue = new Queue<(string SchemaId, int Depth)>();
+        queue.Enqueue((rootSchemaId, 0));
+        AddSchemaNode(rootSchemaId);
+
+        var incomingByTarget = SchemaEdges.Values
+            .SelectMany(x => x)
+            .GroupBy(edge => edge.TargetSchemaId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+
+        while (queue.Count > 0)
+        {
+            if (nodes.Count >= maxNodes)
+            {
+                warnings.Add($"Graph was capped at {maxNodes} nodes. Increase the node limit or lower depth.");
+                break;
             }
 
-            var label = schemaUse.Label.TrimStart();
-            return label.StartsWith("4", StringComparison.Ordinal) ||
-                   label.StartsWith("5", StringComparison.Ordinal) ||
-                   label.StartsWith("default", StringComparison.OrdinalIgnoreCase);
+            var (schemaId, currentDepth) = queue.Dequeue();
+            if (currentDepth >= depth || !incomingByTarget.TryGetValue(schemaId, out var incoming))
+            {
+                continue;
+            }
+
+            foreach (var schemaEdge in incoming)
+            {
+                var nextDepth = currentDepth + 1;
+                if (nextDepth > depth || !IsVisibleSchema(schemaEdge.SourceSchemaId))
+                {
+                    continue;
+                }
+
+                AddSchemaNode(schemaEdge.SourceSchemaId);
+                AddEdge(schemaEdge.SourceSchemaId, schemaEdge.TargetSchemaId, schemaEdge.Kind, schemaEdge.Label);
+
+                if ((!schemaDepth.TryGetValue(schemaEdge.SourceSchemaId, out var knownDepth) || nextDepth < knownDepth) &&
+                    nextDepth <= depth)
+                {
+                    schemaDepth[schemaEdge.SourceSchemaId] = nextDepth;
+                    queue.Enqueue((schemaEdge.SourceSchemaId, nextDepth));
+                }
+
+                if (nodes.Count >= maxNodes)
+                {
+                    break;
+                }
+            }
+        }
+
+        var visibleSchemaIds = nodes.Values
+            .Where(node => node.Kind == "schema")
+            .Select(node => node.Id)
+            .ToHashSet(StringComparer.Ordinal);
+
+        foreach (var endpoint in Endpoints.Values)
+        {
+            if (nodes.Count >= maxNodes)
+            {
+                warnings.Add($"Graph was capped at {maxNodes} nodes. Increase the node limit or lower depth.");
+                break;
+            }
+
+            var visibleUses = endpoint.SchemaUses
+                .Where(use => visibleSchemaIds.Contains(use.SchemaId))
+                .Where(use => !request.HideErrorResponses || !IsErrorResponseUse(use))
+                .ToArray();
+            if (visibleUses.Length == 0)
+            {
+                continue;
+            }
+
+            nodes[endpoint.Id] = new GraphNode
+            {
+                Id = endpoint.Id,
+                Kind = "endpoint",
+                Label = endpoint.Path,
+                Subtitle = endpoint.Summary ?? endpoint.OperationId,
+                Method = endpoint.Method,
+                Tags = endpoint.Tags
+            };
+
+            foreach (var schemaUse in visibleUses)
+            {
+                AddEdge(endpoint.Id, schemaUse.SchemaId, schemaUse.Kind, schemaUse.Label);
+            }
+        }
+
+        var visibleCycles = Cycles
+            .Where(cycle => cycle.SchemaIds.Any(visibleSchemaIds.Contains))
+            .ToArray();
+
+        return new GraphResponse
+        {
+            Nodes = nodes.Values.ToArray(),
+            Edges = edges.Values.ToArray(),
+            Cycles = visibleCycles,
+            Warnings = warnings.Distinct(StringComparer.Ordinal).ToArray()
+        };
+
+        void AddSchemaNode(string schemaId)
+        {
+            if (nodes.ContainsKey(schemaId) || !IsVisibleSchema(schemaId) || !Schemas.TryGetValue(schemaId, out var schema))
+            {
+                return;
+            }
+
+            nodes[schemaId] = new GraphNode
+            {
+                Id = schema.Id,
+                Kind = "schema",
+                Label = schema.Name,
+                Subtitle = SchemaSubtitle(schema),
+                CycleId = schema.CycleId,
+                Properties = request.IncludeProperties ? GraphProperties(schema).Take(60).ToArray() : [],
+                EnumValues = request.HideEnums ? [] : schema.EnumValues
+            };
+        }
+
+        IEnumerable<SchemaPropertyInfo> GraphProperties(SchemaInfo schema)
+        {
+            if (!request.HideEnums)
+            {
+                return schema.Properties;
+            }
+
+            return schema.Properties.Select(property => new SchemaPropertyInfo
+            {
+                Name = property.Name,
+                Type = property.Type,
+                Format = property.Format,
+                SourceSchemaId = property.SourceSchemaId,
+                SourceSchemaName = property.SourceSchemaName,
+                Inherited = property.Inherited,
+                Required = property.Required,
+                Nullable = property.Nullable,
+                RefId = property.RefId,
+                ItemsRefId = property.ItemsRefId,
+                EnumValues = []
+            });
+        }
+
+        void AddEdge(string source, string target, string kind, string label)
+        {
+            var id = $"{source}|{kind}|{label}|{target}";
+            edges.TryAdd(id, new GraphEdge
+            {
+                Id = id,
+                Source = source,
+                Target = target,
+                Kind = kind,
+                Label = label
+            });
+        }
+
+        bool IsVisibleSchema(string schemaId)
+        {
+            return Schemas.TryGetValue(schemaId, out var schema) &&
+                   (!request.HideEnums || schema.EnumValues.Count == 0);
+        }
+
+    }
+
+    private GraphResponse BuildOutgoingGraph(GraphRequest request)
+    {
+        var warnings = new List<string>();
+        var rootSchemaId = request.OutgoingSchemaId!.StartsWith("schema:", StringComparison.Ordinal)
+            ? request.OutgoingSchemaId
+            : $"schema:{request.OutgoingSchemaId}";
+
+        if (!Schemas.ContainsKey(rootSchemaId))
+        {
+            return new GraphResponse
+            {
+                Nodes = [],
+                Edges = [],
+                Cycles = [],
+                Warnings = [$"Model '{request.OutgoingSchemaId}' was not found."]
+            };
+        }
+
+        var depth = request.AllReachable ? int.MaxValue : Math.Clamp(request.Depth, 0, 8);
+        var maxNodes = Math.Clamp(request.MaxNodes, 25, 1_000);
+        var nodes = new Dictionary<string, GraphNode>(StringComparer.Ordinal);
+        var edges = new Dictionary<string, GraphEdge>(StringComparer.Ordinal);
+        var schemaDepth = new Dictionary<string, int>(StringComparer.Ordinal) { [rootSchemaId] = 0 };
+        var queue = new Queue<(string SchemaId, int Depth)>();
+        queue.Enqueue((rootSchemaId, 0));
+        AddSchemaNode(rootSchemaId);
+
+        while (queue.Count > 0)
+        {
+            if (nodes.Count >= maxNodes)
+            {
+                warnings.Add($"Graph was capped at {maxNodes} nodes. Increase the node limit or lower depth.");
+                break;
+            }
+
+            var (schemaId, currentDepth) = queue.Dequeue();
+            if (currentDepth >= depth || !Schemas.TryGetValue(schemaId, out var schema))
+            {
+                continue;
+            }
+
+            foreach (var schemaEdge in PropertyReferenceEdges(schema))
+            {
+                var nextDepth = currentDepth + 1;
+                if (nextDepth > depth || !IsVisibleSchema(schemaEdge.TargetSchemaId))
+                {
+                    continue;
+                }
+
+                AddSchemaNode(schemaEdge.TargetSchemaId);
+                AddEdge(schemaEdge.SourceSchemaId, schemaEdge.TargetSchemaId, schemaEdge.Kind, schemaEdge.Label);
+
+                if ((!schemaDepth.TryGetValue(schemaEdge.TargetSchemaId, out var knownDepth) || nextDepth < knownDepth) &&
+                    nextDepth <= depth)
+                {
+                    schemaDepth[schemaEdge.TargetSchemaId] = nextDepth;
+                    queue.Enqueue((schemaEdge.TargetSchemaId, nextDepth));
+                }
+
+                if (nodes.Count >= maxNodes)
+                {
+                    break;
+                }
+            }
+        }
+
+        var visibleSchemaIds = nodes.Values
+            .Where(node => node.Kind == "schema")
+            .Select(node => node.Id)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var visibleCycles = Cycles
+            .Where(cycle => cycle.SchemaIds.Any(visibleSchemaIds.Contains))
+            .ToArray();
+
+        return new GraphResponse
+        {
+            Nodes = nodes.Values.ToArray(),
+            Edges = edges.Values.ToArray(),
+            Cycles = visibleCycles,
+            Warnings = warnings.Distinct(StringComparer.Ordinal).ToArray()
+        };
+
+        void AddSchemaNode(string schemaId)
+        {
+            if (nodes.ContainsKey(schemaId) || !IsVisibleSchema(schemaId) || !Schemas.TryGetValue(schemaId, out var schema))
+            {
+                return;
+            }
+
+            nodes[schemaId] = new GraphNode
+            {
+                Id = schema.Id,
+                Kind = "schema",
+                Label = schema.Name,
+                Subtitle = SchemaSubtitle(schema),
+                CycleId = schema.CycleId,
+                Properties = request.IncludeProperties ? GraphProperties(schema).Take(60).ToArray() : [],
+                EnumValues = request.HideEnums ? [] : schema.EnumValues
+            };
+        }
+
+        IEnumerable<SchemaPropertyInfo> GraphProperties(SchemaInfo schema)
+        {
+            if (!request.HideEnums)
+            {
+                return schema.Properties;
+            }
+
+            return schema.Properties.Select(property => new SchemaPropertyInfo
+            {
+                Name = property.Name,
+                Type = property.Type,
+                Format = property.Format,
+                SourceSchemaId = property.SourceSchemaId,
+                SourceSchemaName = property.SourceSchemaName,
+                Inherited = property.Inherited,
+                Required = property.Required,
+                Nullable = property.Nullable,
+                RefId = property.RefId,
+                ItemsRefId = property.ItemsRefId,
+                EnumValues = []
+            });
+        }
+
+        void AddEdge(string source, string target, string kind, string label)
+        {
+            var id = $"{source}|{kind}|{label}|{target}";
+            edges.TryAdd(id, new GraphEdge
+            {
+                Id = id,
+                Source = source,
+                Target = target,
+                Kind = kind,
+                Label = label
+            });
+        }
+
+        bool IsVisibleSchema(string schemaId)
+        {
+            return Schemas.TryGetValue(schemaId, out var schema) &&
+                   (!request.HideEnums || schema.EnumValues.Count == 0);
+        }
+    }
+
+    private static bool IsErrorResponseUse(EndpointSchemaUse schemaUse)
+    {
+        if (!string.Equals(schemaUse.Kind, "ResponseBody", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var label = schemaUse.Label.TrimStart();
+        return label.StartsWith("4", StringComparison.Ordinal) ||
+               label.StartsWith("5", StringComparison.Ordinal) ||
+               label.StartsWith("default", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static IEnumerable<SchemaEdge> PropertyReferenceEdges(SchemaInfo schema)
+    {
+        foreach (var property in schema.Properties)
+        {
+            var targetId = property.ItemsRefId ?? property.RefId;
+            if (string.IsNullOrWhiteSpace(targetId))
+            {
+                continue;
+            }
+
+            var inherited = property.Inherited && !string.IsNullOrWhiteSpace(property.SourceSchemaName)
+                ? $" (from {property.SourceSchemaName})"
+                : "";
+            yield return new SchemaEdge
+            {
+                SourceSchemaId = schema.Id,
+                TargetSchemaId = targetId,
+                Kind = property.ItemsRefId is null ? "Property" : "ArrayItem",
+                Label = $"{property.Name}{inherited}"
+            };
         }
     }
 
@@ -397,6 +803,18 @@ internal static class OpenApiDiffBuilder
             .OrderBy(endpoint => endpoint.Path, StringComparer.OrdinalIgnoreCase)
             .ThenBy(endpoint => endpoint.Method, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        var changedSchemas = AllSchemaIds(baseIndex, compareIndex)
+            .Select(schemaId => schemaDiffs.GetValueOrDefault(schemaId))
+            .Where(diff => diff is not null && diff.State != Unchanged)
+            .Select(diff => WithSchemaDiff(diff!.Item, diff.State, diff.Entries, baseIndex, compareIndex))
+            .OrderBy(schema => schema.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var affectedSchemas = AllSchemaIds(baseIndex, compareIndex)
+            .Select(schemaId => SchemaState(schemaId, baseIndex, compareIndex, schemaDiffs, edgeDiffs))
+            .Where(diff => diff.State == Affected)
+            .Select(diff => WithSchemaDiff(diff.Item, diff.State, diff.Entries, baseIndex, compareIndex))
+            .OrderBy(schema => schema.Name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
 
         return new SpecDiffSummary
         {
@@ -414,7 +832,9 @@ internal static class OpenApiDiffBuilder
                 AddedEdges = edgeDiffs.Count(x => x.Value == Added),
                 DeletedEdges = edgeDiffs.Count(x => x.Value == Deleted)
             },
-            ChangedEndpoints = changedEndpoints
+            ChangedEndpoints = changedEndpoints,
+            ChangedSchemas = changedSchemas,
+            AffectedSchemas = affectedSchemas
         };
     }
 
@@ -435,8 +855,14 @@ internal static class OpenApiDiffBuilder
 
     public static GraphResponse BuildGraph(OpenApiIndex baseIndex, OpenApiIndex compareIndex, GraphRequest request)
     {
-        var baseRequest = CopyRequestFor(request, request.EndpointIds.Where(baseIndex.Endpoints.ContainsKey));
-        var compareRequest = CopyRequestFor(request, request.EndpointIds.Where(compareIndex.Endpoints.ContainsKey));
+        var baseRequest = CopyRequestFor(
+            request,
+            request.EndpointIds.Where(baseIndex.Endpoints.ContainsKey),
+            request.SchemaIds.Where(baseIndex.Schemas.ContainsKey));
+        var compareRequest = CopyRequestFor(
+            request,
+            request.EndpointIds.Where(compareIndex.Endpoints.ContainsKey),
+            request.SchemaIds.Where(compareIndex.Schemas.ContainsKey));
         var baseGraph = baseIndex.BuildGraph(baseRequest);
         var compareGraph = compareIndex.BuildGraph(compareRequest);
         var endpointDiffs = BuildEndpointDiffs(baseIndex, compareIndex);
@@ -518,6 +944,7 @@ internal static class OpenApiDiffBuilder
             .ToArray();
         var warnings = baseGraph.Warnings.Concat(compareGraph.Warnings)
             .Where(warning => !warning.Contains("Select at least one endpoint", StringComparison.OrdinalIgnoreCase))
+            .Where(warning => !warning.Contains("Select endpoints or models", StringComparison.OrdinalIgnoreCase))
             .Distinct(StringComparer.Ordinal)
             .ToArray();
 
@@ -530,11 +957,17 @@ internal static class OpenApiDiffBuilder
         };
     }
 
-    private static GraphRequest CopyRequestFor(GraphRequest request, IEnumerable<string> endpointIds)
+    private static GraphRequest CopyRequestFor(
+        GraphRequest request,
+        IEnumerable<string> endpointIds,
+        IEnumerable<string> schemaIds)
     {
         return new GraphRequest
         {
             EndpointIds = endpointIds.Distinct(StringComparer.Ordinal).ToArray(),
+            SchemaIds = schemaIds.Distinct(StringComparer.Ordinal).ToArray(),
+            IncomingSchemaId = request.IncomingSchemaId,
+            OutgoingSchemaId = request.OutgoingSchemaId,
             Depth = request.Depth,
             MaxNodes = request.MaxNodes,
             IncludeProperties = request.IncludeProperties,
@@ -549,6 +982,14 @@ internal static class OpenApiDiffBuilder
     {
         return baseIndex.Endpoints.Keys
             .Concat(compareIndex.Endpoints.Keys)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> AllSchemaIds(OpenApiIndex baseIndex, OpenApiIndex compareIndex)
+    {
+        return baseIndex.Schemas.Keys
+            .Concat(compareIndex.Schemas.Keys)
             .Distinct(StringComparer.Ordinal)
             .ToArray();
     }
@@ -1004,7 +1445,13 @@ internal static class OpenApiDiffBuilder
             ItemsRefId = property.ItemsRefId,
             EnumValues = property.EnumValues,
             DiffState = state,
-            PreviousType = state == Modified && before is not null ? PropertySignature(before) : null
+            PreviousType = state == Modified && before is not null &&
+                           !string.Equals(PropertyDisplayType(before), PropertyDisplayType(property), StringComparison.Ordinal)
+                ? PropertyDisplayType(before)
+                : null,
+            PreviousRequired = state == Modified && before is not null && before.Required != property.Required
+                ? before.Required
+                : null
         };
     }
 
@@ -1020,15 +1467,36 @@ internal static class OpenApiDiffBuilder
 
     private static string PropertySignature(SchemaPropertyInfo property)
     {
-        var type = property.ItemsRefId is not null
-            ? $"{StripSchemaPrefix(property.ItemsRefId)}[]"
-            : property.RefId is not null
-                ? StripSchemaPrefix(property.RefId)
-                : SchemaType(property.Type, property.Format);
+        var type = PropertyDisplayType(property);
         var required = property.Required ? "required" : "optional";
         var nullable = property.Nullable ? ", nullable" : "";
         var enums = property.EnumValues.Count == 0 ? "" : $", enum: {string.Join(", ", property.EnumValues)}";
         return $"{type} ({required}{nullable}{enums})";
+    }
+
+    private static string PropertyDisplayType(SchemaPropertyInfo property)
+    {
+        if (property.ItemsRefId is not null)
+        {
+            return $"{StripSchemaPrefix(property.ItemsRefId)}[]";
+        }
+
+        if (property.RefId is not null)
+        {
+            return StripSchemaPrefix(property.RefId);
+        }
+
+        if (property.EnumValues.Count > 0)
+        {
+            return $"enum({property.EnumValues.Count})";
+        }
+
+        if (!string.IsNullOrWhiteSpace(property.Format))
+        {
+            return $"{property.Type ?? "value"}:{property.Format}";
+        }
+
+        return property.Type ?? "value";
     }
 
     private static string SchemaType(SchemaInfo schema)

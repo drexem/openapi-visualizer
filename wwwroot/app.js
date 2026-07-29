@@ -23,15 +23,21 @@ const state = {
     specId: null,
     compareSpecId: null,
     changedEndpoints: [],
+    changedModels: [],
+    affectedModels: [],
     endpoints: [],
     allEndpoints: [],
+    models: [],
+    modelTab: "all",
     selected: new Map(),
     favorites: readFavoriteEndpoints(),
     detailsCollapsed: readDetailsCollapsed(),
-    collapsedSections: new Set(["endpoints", "changed", "affected", "selected"]),
+    collapsedSections: new Set(["endpoints", "models", "changed", "affected", "selected"]),
     method: "",
     cy: null,
     lastGraph: null,
+    graphLayoutRootIds: [],
+    graphFocusNodeId: null,
     searchTimer: null,
     currentDetailsNode: null,
     schemaCache: new Map(),
@@ -65,6 +71,9 @@ const els = {
     favoriteCount: document.getElementById("favoriteCount"),
     endpointList: document.getElementById("endpointList"),
     endpointCount: document.getElementById("endpointCount"),
+    modelList: document.getElementById("modelList"),
+    modelCount: document.getElementById("modelCount"),
+    modelTabs: document.querySelectorAll("[data-model-tab]"),
     changedEndpointSection: document.getElementById("changedEndpointSection"),
     changedEndpointList: document.getElementById("changedEndpointList"),
     changedEndpointCount: document.getElementById("changedEndpointCount"),
@@ -96,6 +105,7 @@ const els = {
     resetSettingsButton: document.getElementById("resetSettingsButton"),
     layoutButton: document.getElementById("layoutButton"),
     fitButton: document.getElementById("fitButton"),
+    showChangesButton: document.getElementById("showChangesButton"),
     graphStatus: document.getElementById("graphStatus"),
     graph: document.getElementById("graph"),
     emptyGraph: document.getElementById("emptyGraph"),
@@ -123,6 +133,7 @@ window.addEventListener("DOMContentLoaded", () => {
     renderSectionCollapse();
     renderDiffControls();
     renderChangedEndpoints();
+    renderModelBrowser();
     renderDetails(null);
     refreshIcons();
     loadDiffSources();
@@ -157,7 +168,17 @@ function wireEvents() {
 
     els.endpointSearch.addEventListener("input", () => {
         clearTimeout(state.searchTimer);
-        state.searchTimer = setTimeout(loadEndpoints, 160);
+        state.searchTimer = setTimeout(() => {
+            loadEndpoints();
+            loadModels();
+        }, 160);
+    });
+
+    els.modelTabs?.forEach(button => {
+        button.addEventListener("click", () => {
+            state.modelTab = button.dataset.modelTab || "all";
+            renderModelBrowser();
+        });
     });
 
     els.methodFiltersToggle.addEventListener("click", () => {
@@ -233,6 +254,8 @@ function wireEvents() {
         state.selected.clear();
         renderFavorites();
         renderEndpoints();
+        renderChangedEndpoints();
+        renderModelBrowser();
         renderSelected();
         updateGraph();
     });
@@ -256,7 +279,9 @@ function wireEvents() {
     els.resetSettingsButton.addEventListener("click", resetGraphSettings);
     els.layoutButton.addEventListener("click", runLayout);
     els.fitButton.addEventListener("click", () => state.cy?.fit(undefined, 40));
+    els.showChangesButton?.addEventListener("click", showAllChanges);
     document.addEventListener("click", () => setSettingsOpen(false));
+    document.addEventListener("keydown", handleGraphKeyboardShortcut);
     document.addEventListener("keydown", event => {
         if (event.key === "Escape") {
             if (!els.schemaExplorerOverlay?.classList.contains("hidden")) {
@@ -384,6 +409,45 @@ function setSettingsOpen(open) {
     els.settingsButton.setAttribute("aria-expanded", String(open));
 }
 
+function handleGraphKeyboardShortcut(event) {
+    if (event.repeat || isEditableTarget(event.target)) {
+        return;
+    }
+
+    const key = event.key.toLowerCase();
+    if (key !== "i" && key !== "o") {
+        return;
+    }
+
+    const data = selectedGraphNodeData();
+    if (!data) {
+        setStatus("Select a graph node first");
+        return;
+    }
+
+    event.preventDefault();
+    if (key === "i") {
+        loadIncomingGraph(data);
+    } else {
+        loadOutgoingGraph(data);
+    }
+}
+
+function selectedGraphNodeData() {
+    const selected = state.cy?.nodes(":selected");
+    if (!selected || selected.length === 0) {
+        return null;
+    }
+
+    return selected[selected.length - 1].data();
+}
+
+function isEditableTarget(target) {
+    return target instanceof HTMLElement &&
+        (target.isContentEditable ||
+            ["INPUT", "TEXTAREA", "SELECT", "BUTTON"].includes(target.tagName));
+}
+
 function readFavoriteEndpoints() {
     try {
         return new Set(JSON.parse(localStorage.getItem("openapi-visualizer:favorites") || "[]"));
@@ -509,6 +573,9 @@ async function importSpec() {
         state.specId = summary.specId;
         state.compareSpecId = null;
         state.changedEndpoints = [];
+        state.changedModels = [];
+        state.affectedModels = [];
+        state.modelTab = "all";
         state.selected.clear();
         state.currentDetailsNode = null;
         state.schemaCache.clear();
@@ -518,7 +585,9 @@ async function importSpec() {
         renderSpecMeta(summary);
         await loadAllEndpoints();
         await loadEndpoints();
+        await loadModels();
         renderChangedEndpoints();
+        renderModelBrowser();
         renderSelected();
         updateGraph();
         setStatus("Ready");
@@ -554,6 +623,8 @@ async function importComparisonSpec() {
         const diff = await response.json();
         state.compareSpecId = diff.compareSpecId;
         state.changedEndpoints = diff.changedEndpoints || [];
+        state.changedModels = diff.changedSchemas || [];
+        state.affectedModels = diff.affectedSchemas || [];
         state.schemaCache.clear();
         state.schemaExplorerLoadErrors.clear();
         closeSchemaExplorer();
@@ -561,6 +632,7 @@ async function importComparisonSpec() {
         renderChangedEndpoints();
         renderFavorites();
         renderEndpoints();
+        renderModelBrowser();
         renderSelected();
         updateGraph();
         setStatus("Diff ready");
@@ -577,6 +649,9 @@ async function importComparisonSpec() {
 function clearDiff() {
     state.compareSpecId = null;
     state.changedEndpoints = [];
+    state.changedModels = [];
+    state.affectedModels = [];
+    state.modelTab = "all";
     state.schemaCache.clear();
     state.schemaExplorerLoadErrors.clear();
     closeSchemaExplorer();
@@ -585,6 +660,7 @@ function clearDiff() {
     renderChangedEndpoints();
     renderFavorites();
     renderEndpoints();
+    renderModelBrowser();
     renderSelected();
     updateGraph();
 }
@@ -592,6 +668,7 @@ function clearDiff() {
 function renderDiffControls() {
     els.compareButton?.classList.toggle("hidden", !state.specId);
     els.compareButton?.classList.toggle("danger", Boolean(state.compareSpecId));
+    els.showChangesButton?.classList.toggle("hidden", !state.compareSpecId);
     els.showOnlyChangedInput?.toggleAttribute("disabled", !state.compareSpecId);
     if (els.compareLabel) {
         els.compareLabel.textContent = state.compareSpecId ? "Clear diff" : "View diff";
@@ -706,6 +783,8 @@ async function applyPreparedDiff(diff) {
     state.specId = diff.baseSpecId;
     state.compareSpecId = diff.compareSpecId;
     state.changedEndpoints = diff.changedEndpoints || [];
+    state.changedModels = diff.changedSchemas || [];
+    state.affectedModels = diff.affectedSchemas || [];
     state.selected.clear();
     state.currentDetailsNode = null;
     state.schemaCache.clear();
@@ -713,6 +792,7 @@ async function applyPreparedDiff(diff) {
     // The changed and affected endpoint lists are the point of a prepared diff, so open those sections.
     state.collapsedSections.delete("changed");
     state.collapsedSections.delete("affected");
+    state.collapsedSections.delete("models");
     closeSchemaExplorer();
 
     renderSectionCollapse();
@@ -725,7 +805,9 @@ async function applyPreparedDiff(diff) {
 
     await loadAllEndpoints();
     await loadEndpoints();
+    await loadModels();
     renderChangedEndpoints();
+    renderModelBrowser();
     renderSelected();
     updateGraph();
 }
@@ -838,6 +920,24 @@ async function loadAllEndpoints() {
     renderFavorites();
 }
 
+async function loadModels() {
+    if (!state.specId) {
+        state.models = [];
+        renderModelBrowser();
+        return;
+    }
+
+    const params = new URLSearchParams();
+    params.set("limit", "180");
+    if (els.endpointSearch.value.trim()) {
+        params.set("query", els.endpointSearch.value.trim());
+    }
+
+    const response = await fetch(`/api/specs/${state.specId}/models?${params}`);
+    state.models = response.ok ? await response.json() : [];
+    renderModelBrowser();
+}
+
 function renderEndpoints() {
     els.endpointCount.textContent = state.endpoints.length.toString();
     els.endpointList.innerHTML = "";
@@ -892,6 +992,57 @@ function renderChangedEndpoints() {
     refreshIcons();
 }
 
+function renderModelBrowser() {
+    if (!els.modelList || !els.modelCount) {
+        return;
+    }
+
+    const models = currentModelList();
+    els.modelCount.textContent = models.length.toString();
+    els.modelTabs?.forEach(button => {
+        const tab = button.dataset.modelTab || "all";
+        button.classList.toggle("active", tab === state.modelTab);
+        button.setAttribute("aria-selected", String(tab === state.modelTab));
+        button.disabled = tab !== "all" && !state.compareSpecId;
+    });
+
+    els.modelList.innerHTML = "";
+    if (models.length === 0) {
+        els.modelList.innerHTML = `<div class="empty-list">${escapeHtml(modelEmptyText())}</div>`;
+        return;
+    }
+
+    for (const model of models) {
+        els.modelList.appendChild(createModelRow(withKnownModelDiff(model)));
+    }
+
+    refreshIcons();
+}
+
+function currentModelList() {
+    if (state.modelTab === "changed") {
+        return state.changedModels || [];
+    }
+
+    if (state.modelTab === "affected") {
+        return state.affectedModels || [];
+    }
+
+    return state.models || [];
+}
+
+function modelEmptyText() {
+    if (state.modelTab === "changed") {
+        return state.compareSpecId ? "No changed models" : "Load a diff to see changed models";
+    }
+
+    if (state.modelTab === "affected") {
+        return state.compareSpecId ? "No affected models" : "Load a diff to see affected models";
+    }
+
+    return "No models";
+}
+
 function renderEndpointDiffList(section, list, count, endpoints, emptyText) {
     section.classList.toggle("hidden", endpoints.length === 0);
     count.textContent = endpoints.length.toString();
@@ -938,9 +1089,61 @@ function createEndpointRow(endpoint) {
     return row;
 }
 
+function createModelRow(model) {
+    const normalized = normalizeModel(model);
+    const selected = state.selected.has(normalized.id);
+    const row = document.createElement("div");
+    row.className = `model-row ${selected ? "selected" : ""} ${diffClass(normalized.diffState)}`;
+
+    const button = document.createElement("button");
+    button.className = "model-item";
+    button.type = "button";
+    button.setAttribute("aria-pressed", String(selected));
+    button.innerHTML = `
+        <span class="model-type-badge">${escapeHtml(normalized.type || "MODEL")}</span>
+        <span class="model-main">
+            <span class="model-name">${escapeHtml(normalized.label)}</span>
+            <span class="model-summary">${escapeHtml(normalized.subtitle || "")}</span>
+        </span>
+        <span class="endpoint-row-state">
+            ${renderDiffBadge(normalized.diffState)}
+        </span>
+    `;
+    button.addEventListener("click", () => toggleModel(normalized));
+    row.appendChild(button);
+    return row;
+}
+
 function withKnownEndpointDiff(endpoint) {
     const changed = state.changedEndpoints?.find(item => item.id === endpoint.id);
     return changed ? { ...endpoint, diffState: changed.diffState, diffEntries: changed.diffEntries || [] } : endpoint;
+}
+
+function withKnownModelDiff(model) {
+    const normalized = normalizeModel(model);
+    const changed = state.changedModels?.find(item => item.id === normalized.id);
+    const affected = state.affectedModels?.find(item => item.id === normalized.id);
+    const known = changed || affected;
+    return known ? { ...normalized, diffState: known.diffState, diffEntries: known.diffEntries || [] } : normalized;
+}
+
+function normalizeModel(model) {
+    const id = model.id || model.schemaId || `schema:${model.name || model.label || ""}`;
+    const properties = model.properties || [];
+    const enumValues = model.enumValues || [];
+    const label = model.label || model.name || stripSchemaPrefix(id);
+    return {
+        ...model,
+        id,
+        kind: "schema",
+        label,
+        rawLabel: model.rawLabel || label,
+        subtitle: model.subtitle || schemaSubtitle(model, properties, enumValues),
+        type: model.type,
+        properties,
+        enumValues,
+        diffEntries: model.diffEntries || []
+    };
 }
 
 function toggleFavorite(endpointId) {
@@ -959,11 +1162,29 @@ function toggleEndpoint(endpoint) {
     if (state.selected.has(endpoint.id)) {
         state.selected.delete(endpoint.id);
     } else {
-        state.selected.set(endpoint.id, endpoint);
+        state.selected.set(endpoint.id, { ...withKnownEndpointDiff(endpoint), kind: "endpoint" });
     }
 
     renderFavorites();
     renderEndpoints();
+    renderChangedEndpoints();
+    renderModelBrowser();
+    renderSelected();
+    updateGraph();
+}
+
+function toggleModel(model) {
+    const normalized = withKnownModelDiff(model);
+    if (state.selected.has(normalized.id)) {
+        state.selected.delete(normalized.id);
+    } else {
+        state.selected.set(normalized.id, normalized);
+    }
+
+    renderFavorites();
+    renderEndpoints();
+    renderChangedEndpoints();
+    renderModelBrowser();
     renderSelected();
     updateGraph();
 }
@@ -972,21 +1193,66 @@ function renderSelected() {
     els.selectedList.innerHTML = "";
     els.selectedCount.textContent = state.selected.size.toString();
 
-    for (const endpoint of state.selected.values()) {
-        const annotated = withKnownEndpointDiff(endpoint);
+    if (state.selected.size === 0) {
+        els.selectedList.innerHTML = `<div class="empty-list">No selected endpoints or models</div>`;
+        return;
+    }
+
+    for (const item of state.selected.values()) {
+        const isModel = isModelItem(item);
+        const annotated = isModel ? withKnownModelDiff(item) : withKnownEndpointDiff(item);
         const button = document.createElement("button");
-        button.className = `selected-item ${diffClass(annotated.diffState)}`;
+        button.className = `selected-item ${isModel ? "model-selected-item" : ""} ${diffClass(annotated.diffState)}`;
         button.type = "button";
-        button.innerHTML = `
+        button.innerHTML = isModel
+            ? `
+            <span class="model-type-badge">${escapeHtml(annotated.type || "MODEL")}</span>
+            <span class="model-main">
+                <span class="model-name">${escapeHtml(annotated.label)}</span>
+            </span>
+            ${renderDiffBadge(annotated.diffState)}
+        `
+            : `
             <span class="method-badge ${escapeHtml(annotated.method)}">${escapeHtml(annotated.method)}</span>
             <span class="endpoint-main">
                 <span class="endpoint-path">${escapeHtml(annotated.path)}</span>
             </span>
             ${renderDiffBadge(annotated.diffState)}
         `;
-        button.addEventListener("click", () => toggleEndpoint(annotated));
+        button.addEventListener("click", () => isModel ? toggleModel(annotated) : toggleEndpoint(annotated));
         els.selectedList.appendChild(button);
     }
+}
+
+function isModelItem(item) {
+    return item?.kind === "schema" || String(item?.id || "").startsWith("schema:");
+}
+
+function showAllChanges() {
+    if (!state.compareSpecId) {
+        return;
+    }
+
+    state.selected.clear();
+    for (const endpoint of state.changedEndpoints || []) {
+        state.selected.set(endpoint.id, { ...endpoint, kind: "endpoint" });
+    }
+    for (const model of [...(state.changedModels || []), ...(state.affectedModels || [])]) {
+        const normalized = normalizeModel(model);
+        state.selected.set(normalized.id, normalized);
+    }
+
+    state.collapsedSections.delete("changed");
+    state.collapsedSections.delete("affected");
+    state.collapsedSections.delete("models");
+    state.collapsedSections.delete("selected");
+    renderSectionCollapse();
+    renderFavorites();
+    renderEndpoints();
+    renderChangedEndpoints();
+    renderModelBrowser();
+    renderSelected();
+    updateGraph();
 }
 
 function initializeGraph() {
@@ -1153,7 +1419,11 @@ function initializeGraph() {
     els.graphNodeActions.className = "graph-node-actions";
     els.graph.appendChild(els.graphNodeActions);
 
-    state.cy.on("tap", "node", event => renderDetails(event.target.data()));
+    state.cy.on("tap", "node", event => {
+        state.cy.nodes().unselect();
+        event.target.select();
+        renderDetails(event.target.data());
+    });
     state.cy.on("tap", "edge", event => renderEdgeDetails(event.target.data()));
     state.cy.on("pan zoom resize position render", updateGraphNodeActionPositions);
 }
@@ -1161,6 +1431,8 @@ function initializeGraph() {
 async function updateGraph() {
     if (!state.specId || state.selected.size === 0) {
         state.lastGraph = null;
+        state.graphLayoutRootIds = [];
+        state.graphFocusNodeId = null;
         state.cy.elements().remove();
         renderGraphNodeActions();
         els.emptyGraph.classList.remove("hidden");
@@ -1171,8 +1443,12 @@ async function updateGraph() {
 
     setStatus("Loading graph");
     const allReachable = els.depthInput.value === "all";
+    const selectedItems = [...state.selected.values()];
+    const selectedEndpointIds = selectedItems.filter(item => !isModelItem(item)).map(item => item.id);
+    const selectedSchemaIds = selectedItems.filter(isModelItem).map(item => item.id);
     const body = {
-        endpointIds: [...state.selected.keys()],
+        endpointIds: selectedEndpointIds,
+        schemaIds: selectedSchemaIds,
         depth: allReachable ? 0 : Number.parseInt(els.depthInput.value, 10) || 4,
         maxNodes: Number.parseInt(els.nodeLimitInput.value, 10) || 250,
         includeProperties: true,
@@ -1198,6 +1474,66 @@ async function updateGraph() {
 
     const graph = await response.json();
     state.lastGraph = graph;
+    state.graphLayoutRootIds = selectedEndpointIds.length > 0 ? selectedEndpointIds : selectedSchemaIds;
+    state.graphFocusNodeId = null;
+    renderGraph(graph);
+}
+
+async function loadIncomingGraph(data) {
+    return loadReferenceGraph(data, "incoming");
+}
+
+async function loadOutgoingGraph(data) {
+    return loadReferenceGraph(data, "outgoing");
+}
+
+async function loadReferenceGraph(data, direction) {
+    if (!state.specId || !data) {
+        return;
+    }
+
+    const label = data.rawLabel || data.label;
+    const body = {
+        depth: 0,
+        maxNodes: Number.parseInt(els.nodeLimitInput.value, 10) || 250,
+        includeProperties: true,
+        allReachable: true,
+        hideEnums: els.hideEnumsInput.checked,
+        hideErrorResponses: els.hideErrorResponsesInput.checked,
+        showOnlyChanged: false
+    };
+
+    if (isSchemaNode(data)) {
+        body[direction === "incoming" ? "incomingSchemaId" : "outgoingSchemaId"] = data.id;
+    } else if (direction === "outgoing" && data.kind === "endpoint") {
+        body.endpointIds = [data.id];
+    } else {
+        setStatus("Incoming references are available for model nodes");
+        return;
+    }
+
+    if (state.compareSpecId) {
+        body.compareSpecId = state.compareSpecId;
+    }
+
+    setStatus(`Loading ${direction} references for ${label}`);
+    renderDetails(data);
+
+    const response = await fetch(`/api/specs/${state.specId}/graph`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body)
+    });
+
+    if (!response.ok) {
+        setStatus(`${direction === "incoming" ? "Incoming" : "Outgoing"} graph failed`);
+        return;
+    }
+
+    const graph = await response.json();
+    state.lastGraph = graph;
+    state.graphLayoutRootIds = direction === "outgoing" && isSchemaNode(data) ? [data.id] : [];
+    state.graphFocusNodeId = isSchemaNode(data) ? data.id : null;
     renderGraph(graph);
 }
 
@@ -1253,6 +1589,12 @@ function renderGraph(graph) {
 
     state.cy.elements().remove();
     state.cy.add(elements);
+    if (state.graphFocusNodeId) {
+        const focusNode = state.cy.getElementById(state.graphFocusNodeId);
+        if (focusNode.length > 0) {
+            focusNode.select();
+        }
+    }
     renderGraphNodeActions();
     runLayout();
 
@@ -1621,7 +1963,7 @@ function runLayout() {
         return;
     }
 
-    const roots = state.cy.nodes("[kind = 'endpoint']");
+    const roots = graphLayoutRoots();
     const horizontalGap = Number.parseFloat(els.horizontalGapInput.value) || graphSettingDefaults.horizontalGap;
     const verticalGap = Number.parseFloat(els.verticalGapInput.value) || graphSettingDefaults.verticalGap;
     const layout = state.cy.layout({
@@ -1641,6 +1983,24 @@ function runLayout() {
         window.requestAnimationFrame(updateGraphNodeActionPositions);
     });
     layout.run();
+}
+
+function graphLayoutRoots() {
+    if (state.graphLayoutRootIds.length > 0) {
+        const rootIds = new Set(state.graphLayoutRootIds);
+        const explicitRoots = state.cy.nodes().filter(node => rootIds.has(node.id()));
+        if (explicitRoots.length > 0) {
+            return explicitRoots;
+        }
+    }
+
+    const endpointRoots = state.cy.nodes("[kind = 'endpoint']");
+    if (endpointRoots.length > 0) {
+        return endpointRoots;
+    }
+
+    const sourceRoots = state.cy.nodes().filter(node => node.incomers("edge").length === 0);
+    return sourceRoots.length > 0 ? sourceRoots : state.cy.nodes();
 }
 
 function applyLeftToRightLayout(roots, horizontalGap, verticalGap) {
@@ -1751,7 +2111,8 @@ function renderDetails(data) {
     }
 
     els.detailsTitle.textContent = data.rawLabel || data.label;
-    els.detailsBadge.textContent = diffLabel(data.diffState);
+    els.detailsBadge.textContent = diffBadgeLabel(data.diffState);
+    els.detailsBadge.title = diffLabel(data.diffState);
     els.detailsBadge.className = diffClass(data.diffState);
     els.detailsBody.innerHTML = renderNodeSummary(data, false) + renderSchemaExplorerAction(data);
     refreshIcons();
@@ -1760,7 +2121,8 @@ function renderDetails(data) {
 function renderEdgeDetails(data) {
     state.currentDetailsNode = null;
     els.detailsTitle.textContent = data.kind;
-    els.detailsBadge.textContent = diffLabel(data.diffState);
+    els.detailsBadge.textContent = diffBadgeLabel(data.diffState);
+    els.detailsBadge.title = diffLabel(data.diffState);
     els.detailsBadge.className = diffClass(data.diffState);
     els.detailsBody.innerHTML = `
         ${renderDiffEntries(data)}
@@ -1860,6 +2222,7 @@ function renderPropertyRow(prop) {
                 <span class="property-name">${prop.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(prop.name)}</span>
                 ${prop.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(prop.enumValues)}</div>` : ""}
                 ${prop.previousType ? `<span class="property-diff-before">${escapeHtml(prop.previousType)}</span>` : ""}
+                ${renderPropertyRequiredChange(prop)}
             </div>
             <span class="property-type">${escapeHtml(propertyType(prop))}</span>
             ${renderDiffBadge(prop.diffState)}
@@ -1968,8 +2331,29 @@ function diffEntryValue(entry) {
 }
 
 function renderDiffBadge(stateName) {
-    const label = diffLabel(stateName);
-    return label ? `<span class="diff-badge ${diffClass(stateName)}">${escapeHtml(label)}</span>` : "";
+    const label = diffBadgeLabel(stateName);
+    const title = diffLabel(stateName);
+    return label ? `<span class="diff-badge ${diffClass(stateName)}" title="${escapeHtml(title)}">${escapeHtml(label)}</span>` : "";
+}
+
+function diffBadgeLabel(stateName) {
+    if (stateName === "added") {
+        return "A";
+    }
+
+    if (stateName === "deleted") {
+        return "D";
+    }
+
+    if (stateName === "modified") {
+        return "M";
+    }
+
+    if (stateName === "affected") {
+        return "AF";
+    }
+
+    return "";
 }
 
 function diffLabel(stateName) {
@@ -2096,7 +2480,7 @@ function renderSchemaTreeNode(schema, pathKey, trail, depth) {
     const meta = [
         type,
         schema.format,
-        diffLabel(schema.diffState)
+        diffBadgeLabel(schema.diffState)
     ].filter(Boolean);
 
     const enumHtml = enumValues.length
@@ -2181,6 +2565,7 @@ function renderSchemaTreeProperty(prop, pathKey, trail, depth) {
                     <span class="schema-tree-property-name">${prop.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(prop.name)}</span>
                     ${prop.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(prop.enumValues)}</div>` : ""}
                     ${prop.previousType ? `<span class="property-diff-before">${escapeHtml(prop.previousType)}</span>` : ""}
+                    ${renderPropertyRequiredChange(prop)}
                 </div>
                 ${extra}
                 <span class="property-type">${escapeHtml(schemaTreePropertyType(prop))}</span>
@@ -2188,6 +2573,22 @@ function renderSchemaTreeProperty(prop, pathKey, trail, depth) {
             </div>
             ${childHtml}
         </div>
+    `;
+}
+
+function renderPropertyRequiredChange(prop) {
+    if (typeof prop.previousRequired !== "boolean" || prop.previousRequired === prop.required) {
+        return "";
+    }
+
+    const before = prop.previousRequired ? "required" : "optional";
+    const after = prop.required ? "required" : "optional";
+    return `
+        <span class="property-required-change">
+            <span class="property-diff-before">${escapeHtml(before)}</span>
+            <span class="property-diff-arrow">-&gt;</span>
+            <span class="property-diff-after">${escapeHtml(after)}</span>
+        </span>
     `;
 }
 
