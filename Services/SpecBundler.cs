@@ -204,7 +204,8 @@ public sealed class SpecBundler
         string outputPath,
         CancellationToken cancellationToken)
     {
-        var workingDirectory = source.ResolveWorkingDirectory();
+        var workingDirectory = Substitute(
+            source.ResolveWorkingDirectory(), treeDir, workDir, outputPath, source.RepoPath);
         for (var index = 0; index < source.Steps.Count; index++)
         {
             var step = source.Steps[index];

@@ -2586,10 +2586,9 @@ internal static class OpenApiIndexBuilder
 
         if (element.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String)
         {
-            if (string.Equals(type.GetString(), "array", StringComparison.OrdinalIgnoreCase) &&
-                element.TryGetProperty("items", out var items))
+            if (string.Equals(type.GetString(), "array", StringComparison.OrdinalIgnoreCase))
             {
-                return TryDirectSchemaRef(items, out var itemRef) ? $"{SchemaName(itemRef)}[]" : "array";
+                return DescribeArrayType(element);
             }
 
             return type.GetString();
@@ -2611,6 +2610,31 @@ internal static class OpenApiIndexBuilder
         }
 
         return "object";
+    }
+
+    /// <summary>
+    /// Names an array by its element type, because a bare "array" says nothing about what the array
+    /// holds. Recurses through <c>items</c>, so an array of arrays reads as <c>string[][]</c> and an
+    /// array of refs as <c>Foo[]</c>. Element formats are kept - a list of uuids is worth
+    /// distinguishing from a list of free-form strings.
+    /// </summary>
+    private static string DescribeArrayType(JsonElement element)
+    {
+        if (!element.TryGetProperty("items", out var items))
+        {
+            return "array";
+        }
+
+        var itemType = ReadType(items);
+        if (string.IsNullOrWhiteSpace(itemType))
+        {
+            return "array";
+        }
+
+        var itemFormat = ReadString(items, "format");
+        return string.IsNullOrWhiteSpace(itemFormat)
+            ? $"{itemType}[]"
+            : $"{itemType}:{itemFormat}[]";
     }
 
     private static IReadOnlyList<string> ReadEnumValues(JsonElement element)

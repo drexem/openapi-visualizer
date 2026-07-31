@@ -2797,7 +2797,7 @@ function propertyKind(prop) {
     if (prop.enumValues?.length) {
         return "enum";
     }
-    if (prop.itemsRefId || type === "array") {
+    if (prop.itemsRefId || type === "array" || type.endsWith("[]")) {
         return "array";
     }
     if (prop.refId || type === "object" || type.startsWith("oneof") || type.startsWith("allof") || type.startsWith("anyof")) {

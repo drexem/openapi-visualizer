@@ -28,8 +28,13 @@ public sealed class SpecSourceOptions
     public string RepoPath { get; set; } = string.Empty;
 
     /// <summary>
-    /// Working directory for the build steps. Defaults to <see cref="RepoPath"/>, which is what
-    /// dotnet local tools need in order to resolve their manifest.
+    /// Working directory for the build steps. Supports the same placeholders as <see cref="Steps"/>.
+    /// Defaults to <see cref="RepoPath"/>.
+    /// <para>Set this to <c>{tree}</c> when the build steps use pinned tooling that the repository
+    /// versions alongside its specs - dotnet local tools, for instance, resolve their manifest from
+    /// the working directory, so leaving it at <see cref="RepoPath"/> silently builds every commit
+    /// with whatever the working copy happens to have checked out rather than what that commit
+    /// pinned. Archive the manifest (and any NuGet feed config it needs) so it is there to find.</para>
     /// </summary>
     public string? WorkingDirectory { get; set; }
 
