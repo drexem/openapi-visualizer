@@ -222,6 +222,13 @@ function wireEvents() {
         setDetailsPanelCollapsed(false);
     });
     els.detailsBody?.addEventListener("click", event => {
+        const copyButton = event.target.closest("[data-copy-model-name]");
+        if (copyButton) {
+            event.preventDefault();
+            copyInlineButtonText(copyButton);
+            return;
+        }
+
         const diffToggle = event.target.closest("[data-toggle-diff-block]");
         if (diffToggle) {
             event.preventDefault();
@@ -252,6 +259,13 @@ function wireEvents() {
         }
     });
     els.schemaExplorerBody?.addEventListener("click", event => {
+        const copyButton = event.target.closest("[data-copy-model-name]");
+        if (copyButton) {
+            event.preventDefault();
+            copyInlineButtonText(copyButton);
+            return;
+        }
+
         const toggle = event.target.closest("[data-schema-toggle]");
         if (!toggle) {
             return;
@@ -1436,6 +1450,16 @@ function initializeGraph() {
                 }
             },
             {
+                selector: "node[selectedRoot = 'true']",
+                style: {
+                    "border-color": "#1d4ed8",
+                    "border-width": 5,
+                    "underlay-color": "#60a5fa",
+                    "underlay-opacity": 0.32,
+                    "underlay-padding": 10
+                }
+            },
+            {
                 selector: ":selected",
                 style: {
                     "border-color": "#23362b",
@@ -1595,6 +1619,7 @@ function renderGraph(graph) {
                     enumCount: node.enumValues?.length || 0,
                     diffState: node.diffState || "",
                     diffEntries: node.diffEntries || [],
+                    selectedRoot: state.selected.has(node.id) ? "true" : "false",
                     width: metrics.width,
                     height: metrics.height,
                     textMaxWidth: metrics.textMaxWidth,
@@ -1731,6 +1756,10 @@ function graphNodeCopyText(data) {
     return data.rawLabel || data.label || "";
 }
 
+function modelCopyName(data) {
+    return stripSchemaPrefix(data?.id || data?.rawLabel || data?.label || data?.name || "");
+}
+
 async function copyGraphNodeText(button) {
     const value = button.dataset.copyText || "";
     if (!value) {
@@ -1784,6 +1813,44 @@ function showGraphNodeCopyState(button, stateName) {
         button.classList.remove("copied", "failed");
         button.innerHTML = `<i data-lucide="copy"></i>`;
         button.title = button.getAttribute("aria-label") || "Copy";
+        refreshIcons();
+    }, 1200);
+}
+
+async function copyInlineButtonText(button) {
+    const value = button.dataset.copyModelName || button.dataset.copyText || "";
+    if (!value) {
+        return;
+    }
+
+    try {
+        await writeClipboardText(value);
+        showInlineCopyState(button, "copied");
+    } catch (error) {
+        console.error(error);
+        showInlineCopyState(button, "failed");
+    }
+}
+
+function showInlineCopyState(button, stateName) {
+    const icon = button.querySelector("[data-lucide]");
+    const defaultIcon = button.dataset.defaultIcon || "copy";
+    const defaultTitle = button.getAttribute("aria-label") || "Copy";
+
+    button.classList.remove("copied", "failed");
+    button.classList.add(stateName);
+    button.title = stateName === "copied" ? "Copied" : "Copy failed";
+    if (icon) {
+        icon.setAttribute("data-lucide", stateName === "copied" ? "check" : "x");
+    }
+    refreshIcons();
+
+    window.setTimeout(() => {
+        button.classList.remove("copied", "failed");
+        button.title = defaultTitle;
+        if (icon) {
+            icon.setAttribute("data-lucide", defaultIcon);
+        }
         refreshIcons();
     }, 1200);
 }
@@ -2188,6 +2255,10 @@ function renderSchemaExplorerAction(data) {
             <button class="schema-explorer-button secondary" type="button" data-open-similar-models>
                 <i data-lucide="scan-search"></i>
                 <span>Similar models</span>
+            </button>
+            <button class="schema-explorer-button secondary copy-inline-button" type="button" data-copy-model-name="${escapeHtml(modelCopyName(data))}" data-default-icon="copy" title="Copy model name" aria-label="Copy model name">
+                <i data-lucide="copy"></i>
+                <span>Copy name</span>
             </button>
         </div>
     `;
@@ -2627,6 +2698,9 @@ function renderSchemaTreeNode(schema, pathKey, trail, depth) {
                     <div class="schema-tree-model-name">${escapeHtml(schema.label)}</div>
                     <div class="schema-tree-model-meta">${meta.map(item => `<span>${escapeHtml(item)}</span>`).join("")}</div>
                 </div>
+                <button class="schema-tree-copy-button copy-inline-button" type="button" data-copy-model-name="${escapeHtml(modelCopyName(schema))}" data-default-icon="copy" title="Copy model name" aria-label="Copy model name">
+                    <i data-lucide="copy"></i>
+                </button>
             </div>
             ${renderDiffEntries(schema)}
             ${enumHtml}

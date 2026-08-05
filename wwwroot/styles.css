@@ -1398,7 +1398,7 @@ body.resizing-panels {
 
 .schema-action-row {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
     gap: 8px;
 }
 
@@ -1429,6 +1429,18 @@ body.resizing-panels {
 
 .schema-explorer-button.secondary:hover {
     background: #dbeafe;
+}
+
+.copy-inline-button.copied {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #ffffff;
+}
+
+.copy-inline-button.failed {
+    border-color: #e86a58;
+    background: #e86a58;
+    color: #ffffff;
 }
 
 .schema-explorer-button svg {
@@ -1907,7 +1919,7 @@ body.resizing-panels {
 
 .schema-tree-model {
     display: grid;
-    grid-template-columns: minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr) auto;
     align-items: start;
     gap: 12px;
     padding: 2px 2px 10px;
@@ -1917,6 +1929,28 @@ body.resizing-panels {
 
 .schema-tree-model-main {
     min-width: 0;
+}
+
+.schema-tree-copy-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 28px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: #ffffff;
+    color: var(--text);
+}
+
+.schema-tree-copy-button:hover {
+    border-color: var(--accent);
+    background: #dbeafe;
+}
+
+.schema-tree-copy-button svg {
+    width: 15px;
+    height: 15px;
 }
 
 .schema-tree-model-name {
