@@ -16,6 +16,9 @@ public sealed class SpecDiffOptions
     /// <summary>Per-command timeout for git and the build steps.</summary>
     public int StepTimeoutSeconds { get; set; } = 300;
 
+    /// <summary>Repository path used by every source that does not set its own <see cref="SpecSourceOptions.RepoPath"/>.</summary>
+    public string? DefaultRepoPath { get; set; }
+
     public List<SpecSourceOptions> Sources { get; set; } = [];
 }
 
@@ -24,7 +27,7 @@ public sealed class SpecSourceOptions
     /// <summary>Display name, also the key callers pass in and the cache subdirectory.</summary>
     public string Name { get; set; } = string.Empty;
 
-    /// <summary>Absolute path to the git repository (working copy is never modified).</summary>
+    /// <summary>Absolute path to the git repository (working copy is never modified). Defaults to <see cref="SpecDiffOptions.DefaultRepoPath"/>.</summary>
     public string RepoPath { get; set; } = string.Empty;
 
     /// <summary>

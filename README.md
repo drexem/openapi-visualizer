@@ -10,6 +10,19 @@ dotnet run --urls http://localhost:5117
 
 Open `http://localhost:5117/`, upload a JSON OpenAPI 3.x spec, search endpoints, and select a few endpoints to render a cycle-safe graph slice.
 
+## Package
+
+```powershell
+./publish.ps1                                   # self-contained win-x64 zip in ./artifacts
+./publish.ps1 -Runtime linux-x64                # other platforms
+./publish.ps1 -FrameworkDependent               # small, needs the .NET 10 runtime
+./publish.ps1 -LocalSettings my-preset.json     # ship a preset as appsettings.Local.json
+```
+
+The package needs no .NET install. Unzip it and run `OpenApiVisualizer.exe`: it serves
+`http://localhost:5117` and opens the browser. `appsettings.Local.json` next to the exe is picked up
+from wherever the exe is started. Your own `appsettings.Local.json` is never packaged.
+
 ## MVP Scope
 
 - Parses the whole JSON spec upfront on the backend.
@@ -47,6 +60,15 @@ self-contained document:
 If the repository already commits a single self-contained spec, drop `Steps` and point `SpecFile` at
 it instead. Placeholders: `{tree}` extracted archive root, `{work}` scratch space, `{output}` the
 finished spec, `{repo}` the repository path.
+
+Sources without a `RepoPath` use `SpecDiff:DefaultRepoPath`, so a preset with several sources over
+one repository needs a single line edited.
+
+### Worktrees
+
+The sidebar lists every worktree of a source's repository (`git worktree list`), wherever it lives
+on disk, and loads its current spec with uncommitted changes. `PrebuiltFile` points at a spec your
+own build already writes into the worktree; when it is missing, `Steps` run against the worktree.
 
 How it works:
 

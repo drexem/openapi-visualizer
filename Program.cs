@@ -1,8 +1,13 @@
+using System.Diagnostics;
 using Microsoft.AspNetCore.Http.Features;
 using OpenApiVisualizer.Models;
 using OpenApiVisualizer.Services;
 
-var builder = WebApplication.CreateBuilder(args);
+// A published build ships wwwroot next to the exe, so anchor the content root there and it works from
+// any working directory. Under `dotnet run` wwwroot stays in the project folder and the default is kept.
+var builder = Directory.Exists(Path.Combine(AppContext.BaseDirectory, "wwwroot"))
+    ? WebApplication.CreateBuilder(new WebApplicationOptions { Args = args, ContentRootPath = AppContext.BaseDirectory })
+    : WebApplication.CreateBuilder(args);
 
 // Local, untracked overrides. Spec sources point at paths and hosts that are specific to whoever
 // is running the tool, so they belong here rather than in the committed appsettings.json.
@@ -17,6 +22,13 @@ builder.Services.Configure<FormOptions>(options =>
 });
 
 builder.Services.Configure<SpecDiffOptions>(builder.Configuration.GetSection(SpecDiffOptions.SectionName));
+builder.Services.PostConfigure<SpecDiffOptions>(options =>
+{
+    foreach (var source in options.Sources.Where(source => string.IsNullOrWhiteSpace(source.RepoPath)))
+    {
+        source.RepoPath = options.DefaultRepoPath ?? string.Empty;
+    }
+});
 builder.Services.AddSingleton<SpecBundler>();
 builder.Services.AddSingleton<PullRequestResolver>();
 builder.Services.AddSingleton<SpecDiffCoordinator>();
@@ -31,6 +43,27 @@ builder.Services.AddHttpClient(PullRequestResolver.HttpClientName)
     });
 
 var app = builder.Build();
+
+if (app.Configuration.GetValue("OpenBrowser", false))
+{
+    app.Lifetime.ApplicationStarted.Register(() =>
+    {
+        var url = app.Urls.FirstOrDefault();
+        if (url is null)
+        {
+            return;
+        }
+
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            app.Logger.LogWarning(ex, "Could not open a browser; navigate to {Url} manually.", url);
+        }
+    });
+}
 
 app.UseDefaultFiles();
 app.UseStaticFiles(new StaticFileOptions
