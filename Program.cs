@@ -92,9 +92,10 @@ app.MapGet("/api/specs/{specId}/endpoints", (
     string? query,
     string? method,
     int? limit,
+    bool? tagOnly,
     OpenApiSpecStore store) =>
 {
-    return Results.Ok(store.SearchEndpoints(specId, query, method, limit ?? 100));
+    return Results.Ok(store.SearchEndpoints(specId, query, method, limit ?? 100, tagOnly ?? false));
 });
 
 app.MapGet("/api/specs/{specId}/models", (

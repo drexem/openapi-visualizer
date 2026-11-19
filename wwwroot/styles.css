@@ -362,9 +362,84 @@ body.resizing-panels {
 
 .search-row {
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 30px;
+    grid-template-columns: minmax(0, 1fr) 30px 30px;
     align-items: center;
     gap: 8px;
+}
+
+.filter-toggle.active {
+    background: #dbeafe;
+    color: #1f4f78;
+    border-color: #93c5fd;
+}
+
+.tag-toolbar {
+    display: flex;
+    gap: 6px;
+    padding: 4px 0 6px;
+}
+
+.tag-toolbar-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: transparent;
+    color: inherit;
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.tag-toolbar-button svg {
+    width: 13px;
+    height: 13px;
+}
+
+.tag-group-header {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 4px;
+    border: 0;
+    border-bottom: 1px solid var(--line);
+    background: transparent;
+    color: inherit;
+    font-size: 12px;
+    font-weight: 700;
+    text-align: left;
+    cursor: pointer;
+}
+
+.tag-group-header svg {
+    width: 14px;
+    height: 14px;
+    transition: transform 0.15s;
+}
+
+.tag-group.collapsed .tag-group-header svg {
+    transform: rotate(-90deg);
+}
+
+.tag-group-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.tag-group-count {
+    font-size: 11px;
+    font-weight: 600;
+    opacity: 0.7;
+}
+
+.child-model-chip {
+    border: 0;
+    cursor: pointer;
 }
 
 .filter-toggle svg {
@@ -1645,8 +1720,14 @@ body.resizing-panels {
 
 .schema-explorer-dialog {
     display: flex;
-    width: min(980px, calc(100vw - 56px));
-    max-height: min(760px, calc(100vh - 56px));
+    /* Property lists are the reason this dialog exists, so let it take up to 80% of the viewport
+       width on a large screen. The max() keeps it at least as wide as it was on small ones, and the
+       min() stops it growing past the overlay padding. */
+    width: min(max(980px, 80vw), calc(100vw - 56px));
+    /* Height gets everything that is going: long property lists always scroll, so any pixel spent
+       on empty overlay is a row the reader cannot see. A percentage cap is wrong here - on a laptop
+       viewport 80vh is less than the old fixed 760px, which is why this used to stay small. */
+    max-height: calc(100vh - 56px);
     min-height: 420px;
     flex-direction: column;
     overflow: hidden;
@@ -1696,7 +1777,8 @@ body.resizing-panels {
 
 #schemaExplorerBadge {
     display: block;
-    max-width: 760px;
+    /* Tracks the dialog width, so the subtitle stops being clipped once the dialog is wide. */
+    max-width: max(760px, 70vw);
     overflow: hidden;
     color: var(--muted);
     font-size: 12px;

@@ -67,7 +67,7 @@ public sealed class OpenApiSpecStore
         return _specs.TryGetValue(specId, out var index) ? index.Summary : null;
     }
 
-    public IReadOnlyList<EndpointInfo> SearchEndpoints(string specId, string? query, string? method, int limit)
+    public IReadOnlyList<EndpointInfo> SearchEndpoints(string specId, string? query, string? method, int limit, bool tagOnly = false)
     {
         if (!_specs.TryGetValue(specId, out var index))
         {
@@ -79,13 +79,15 @@ public sealed class OpenApiSpecStore
             .Where(endpoint => string.IsNullOrWhiteSpace(method) ||
                                string.Equals(endpoint.Method, method, StringComparison.OrdinalIgnoreCase))
             .Where(endpoint => string.IsNullOrWhiteSpace(normalizedQuery) ||
-                               endpoint.Id.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ||
-                               (endpoint.Summary?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                               (endpoint.OperationId?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ?? false) ||
-                               endpoint.Tags.Any(tag => tag.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase)))
+                               (tagOnly
+                                   ? endpoint.Tags.Any(tag => tag.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))
+                                   : endpoint.Id.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ||
+                                     (endpoint.Summary?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                                     (endpoint.OperationId?.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase) ?? false) ||
+                                     endpoint.Tags.Any(tag => tag.Contains(normalizedQuery, StringComparison.OrdinalIgnoreCase))))
             .OrderBy(endpoint => endpoint.Path, StringComparer.OrdinalIgnoreCase)
             .ThenBy(endpoint => endpoint.Method, StringComparer.OrdinalIgnoreCase)
-            .Take(Math.Clamp(limit, 1, 500))
+            .Take(Math.Clamp(limit, 1, 3000))
             .ToArray();
     }
 
@@ -504,7 +506,7 @@ internal sealed class OpenApiIndex
                 }
 
                 AddSchemaNode(schemaEdge.TargetSchemaId);
-                AddEdge(schemaEdge.SourceSchemaId, schemaEdge.TargetSchemaId, schemaEdge.Kind, schemaEdge.Label);
+                AddEdge(schemaEdge.DisplaySourceId, schemaEdge.DisplayTargetId, schemaEdge.Kind, schemaEdge.Label);
 
                 if ((!schemaDepth.TryGetValue(schemaEdge.TargetSchemaId, out var knownDepth) || nextDepth < knownDepth) &&
                     nextDepth <= depth)
@@ -552,7 +554,8 @@ internal sealed class OpenApiIndex
                 Subtitle = SchemaSubtitle(schema),
                 CycleId = schema.CycleId,
                 Properties = request.IncludeProperties ? GraphProperties(schema).Take(60).ToArray() : [],
-                EnumValues = request.HideEnums ? [] : schema.EnumValues
+                EnumValues = request.HideEnums ? [] : schema.EnumValues,
+                Children = schema.Children
             };
         }
 
@@ -655,7 +658,7 @@ internal sealed class OpenApiIndex
                 }
 
                 AddSchemaNode(schemaEdge.SourceSchemaId);
-                AddEdge(schemaEdge.SourceSchemaId, schemaEdge.TargetSchemaId, schemaEdge.Kind, schemaEdge.Label);
+                AddEdge(schemaEdge.DisplaySourceId, schemaEdge.DisplayTargetId, schemaEdge.Kind, schemaEdge.Label);
 
                 if ((!schemaDepth.TryGetValue(schemaEdge.SourceSchemaId, out var knownDepth) || nextDepth < knownDepth) &&
                     nextDepth <= depth)
@@ -736,7 +739,8 @@ internal sealed class OpenApiIndex
                 Subtitle = SchemaSubtitle(schema),
                 CycleId = schema.CycleId,
                 Properties = request.IncludeProperties ? GraphProperties(schema).Take(60).ToArray() : [],
-                EnumValues = request.HideEnums ? [] : schema.EnumValues
+                EnumValues = request.HideEnums ? [] : schema.EnumValues,
+                Children = schema.Children
             };
         }
 
@@ -834,7 +838,7 @@ internal sealed class OpenApiIndex
                 }
 
                 AddSchemaNode(schemaEdge.TargetSchemaId);
-                AddEdge(schemaEdge.SourceSchemaId, schemaEdge.TargetSchemaId, schemaEdge.Kind, schemaEdge.Label);
+                AddEdge(schemaEdge.DisplaySourceId, schemaEdge.DisplayTargetId, schemaEdge.Kind, schemaEdge.Label);
 
                 if ((!schemaDepth.TryGetValue(schemaEdge.TargetSchemaId, out var knownDepth) || nextDepth < knownDepth) &&
                     nextDepth <= depth)
@@ -882,7 +886,8 @@ internal sealed class OpenApiIndex
                 Subtitle = SchemaSubtitle(schema),
                 CycleId = schema.CycleId,
                 Properties = request.IncludeProperties ? GraphProperties(schema).Take(60).ToArray() : [],
-                EnumValues = request.HideEnums ? [] : schema.EnumValues
+                EnumValues = request.HideEnums ? [] : schema.EnumValues,
+                Children = schema.Children
             };
         }
 
@@ -1439,7 +1444,7 @@ internal static class OpenApiDiffBuilder
 
         foreach (var edge in index.SchemaEdges.Values.SelectMany(x => x))
         {
-            ids.Add(GraphEdgeId(edge.SourceSchemaId, edge.Kind, edge.Label, edge.TargetSchemaId));
+            ids.Add(GraphEdgeId(edge.DisplaySourceId, edge.Kind, edge.Label, edge.DisplayTargetId));
         }
 
         return ids;
@@ -1511,7 +1516,7 @@ internal static class OpenApiDiffBuilder
 
             foreach (var edge in outgoing.Where(edge => reachableSchemaIds.Contains(edge.TargetSchemaId)))
             {
-                yield return GraphEdgeId(edge.SourceSchemaId, edge.Kind, edge.Label, edge.TargetSchemaId);
+                yield return GraphEdgeId(edge.DisplaySourceId, edge.Kind, edge.Label, edge.DisplayTargetId);
             }
         }
     }
@@ -1530,7 +1535,7 @@ internal static class OpenApiDiffBuilder
         {
             if (reachableSchemaIds.Contains(edge.SourceSchemaId) || reachableSchemaIds.Contains(edge.TargetSchemaId))
             {
-                yield return GraphEdgeId(edge.SourceSchemaId, edge.Kind, edge.Label, edge.TargetSchemaId);
+                yield return GraphEdgeId(edge.DisplaySourceId, edge.Kind, edge.Label, edge.DisplayTargetId);
             }
         }
     }
@@ -1567,6 +1572,7 @@ internal static class OpenApiDiffBuilder
             Description = schema.Description,
             Properties = DiffProperties(schema.Id, baseIndex, compareIndex),
             EnumValues = schema.EnumValues,
+            Children = schema.Children,
             OutgoingReferenceCount = schema.OutgoingReferenceCount,
             IncomingReferenceCount = schema.IncomingReferenceCount,
             CycleId = schema.CycleId,
@@ -1597,6 +1603,7 @@ internal static class OpenApiDiffBuilder
             Properties = properties,
             EnumValues = node.EnumValues,
             Tags = node.Tags,
+            Children = node.Children,
             DiffState = state,
             DiffEntries = entries
         };
@@ -1955,7 +1962,8 @@ internal static class OpenApiIndexBuilder
                             SourceSchemaId = first.SourceSchemaId,
                             TargetSchemaId = first.TargetSchemaId,
                             Kind = "Inheritance",
-                            Label = "inherits"
+                            Label = "inherits",
+                            ChildToParent = groupedEdges.Any(edge => string.Equals(edge.Kind, "AllOf", StringComparison.Ordinal))
                         }
                     ];
                 }
@@ -2302,11 +2310,40 @@ internal static class OpenApiIndexBuilder
         Dictionary<string, SchemaInfo> schemas,
         Dictionary<string, List<SchemaEdge>> edges)
     {
+        var childrenByParent = new Dictionary<string, List<SchemaRefInfo>>(StringComparer.Ordinal);
         foreach (var edge in edges.Values.SelectMany(x => x))
         {
             if (schemas.TryGetValue(edge.TargetSchemaId, out var target))
             {
                 target.IncomingReferenceCount++;
+            }
+
+            if (string.Equals(edge.Kind, "Inheritance", StringComparison.Ordinal) &&
+                schemas.TryGetValue(edge.DisplayTargetId, out var child))
+            {
+                if (!childrenByParent.TryGetValue(edge.DisplaySourceId, out var list))
+                {
+                    list = childrenByParent[edge.DisplaySourceId] = [];
+                }
+
+                if (list.All(item => item.Id != child.Id))
+                {
+                    list.Add(new SchemaRefInfo { Id = child.Id, Name = child.Name });
+                }
+            }
+        }
+
+        foreach (var (parentId, list) in childrenByParent)
+        {
+            if (schemas.TryGetValue(parentId, out var parent))
+            {
+                schemas[parentId] = new SchemaInfo
+                {
+                    Id = parent.Id, Name = parent.Name, Type = parent.Type, Format = parent.Format,
+                    Description = parent.Description, Properties = parent.Properties, EnumValues = parent.EnumValues,
+                    Children = list.OrderBy(item => item.Name, StringComparer.OrdinalIgnoreCase).ToArray(),
+                    IncomingReferenceCount = parent.IncomingReferenceCount
+                };
             }
         }
 
@@ -2326,6 +2363,7 @@ internal static class OpenApiIndexBuilder
                 Description = schema.Description,
                 Properties = schema.Properties,
                 EnumValues = schema.EnumValues,
+                Children = schema.Children,
                 IncomingReferenceCount = schema.IncomingReferenceCount,
                 OutgoingReferenceCount = sourceEdges.Count
             };

@@ -34,6 +34,8 @@ const state = {
     detailsCollapsed: readDetailsCollapsed(),
     collapsedSections: new Set(["endpoints", "models", "changed", "affected", "selected"]),
     method: "",
+    tagSearch: false,
+    tagOpen: new Map(),
     cy: null,
     lastGraph: null,
     graphLayoutRootIds: [],
@@ -66,6 +68,7 @@ const els = {
     diffProvenance: document.getElementById("diffProvenance"),
     specMeta: document.getElementById("specMeta"),
     endpointSearch: document.getElementById("endpointSearch"),
+    tagSearchToggle: document.getElementById("tagSearchToggle"),
     methodFiltersToggle: document.getElementById("methodFiltersToggle"),
     methodFilters: document.getElementById("methodFilters"),
     favoriteList: document.getElementById("favoriteList"),
@@ -180,6 +183,16 @@ function wireEvents() {
         }, 160);
     });
 
+    els.tagSearchToggle?.addEventListener("click", () => {
+        state.tagSearch = !state.tagSearch;
+        els.tagSearchToggle.classList.toggle("active", state.tagSearch);
+        els.tagSearchToggle.setAttribute("aria-pressed", String(state.tagSearch));
+        els.endpointSearch.placeholder = state.tagSearch ? "Search by tag" : "Search endpoints or models";
+        state.tagOpen.clear();
+        loadEndpoints();
+        loadModels();
+    });
+
     els.modelTabs?.forEach(button => {
         button.addEventListener("click", () => {
             state.modelTab = button.dataset.modelTab || "all";
@@ -239,6 +252,13 @@ function wireEvents() {
             return;
         }
 
+        const childChip = event.target.closest("[data-open-schema-id]");
+        if (childChip) {
+            event.preventDefault();
+            openSchemaById(childChip.dataset.openSchemaId);
+            return;
+        }
+
         const button = event.target.closest("[data-open-schema-explorer]");
         if (button && state.currentDetailsNode) {
             event.preventDefault();
@@ -263,6 +283,13 @@ function wireEvents() {
         if (copyButton) {
             event.preventDefault();
             copyInlineButtonText(copyButton);
+            return;
+        }
+
+        const childChip = event.target.closest("[data-open-schema-id]");
+        if (childChip) {
+            event.preventDefault();
+            openSchemaById(childChip.dataset.openSchemaId);
             return;
         }
 
@@ -941,9 +968,12 @@ async function loadEndpoints() {
     }
 
     const params = new URLSearchParams();
-    params.set("limit", "180");
+    params.set("limit", "3000");
     if (els.endpointSearch.value.trim()) {
         params.set("query", els.endpointSearch.value.trim());
+        if (state.tagSearch) {
+            params.set("tagOnly", "true");
+        }
     }
     if (state.method) {
         params.set("method", state.method);
@@ -962,7 +992,7 @@ async function loadAllEndpoints() {
         return;
     }
 
-    const response = await fetch(`/api/specs/${state.specId}/endpoints?limit=500`);
+    const response = await fetch(`/api/specs/${state.specId}/endpoints?limit=3000`);
     state.allEndpoints = response.ok ? await response.json() : [];
     renderFavorites();
 }
@@ -976,7 +1006,7 @@ async function loadModels() {
 
     const params = new URLSearchParams();
     params.set("limit", "180");
-    if (els.endpointSearch.value.trim()) {
+    if (els.endpointSearch.value.trim() && !state.tagSearch) {
         params.set("query", els.endpointSearch.value.trim());
     }
 
@@ -989,11 +1019,97 @@ function renderEndpoints() {
     els.endpointCount.textContent = state.endpoints.length.toString();
     els.endpointList.innerHTML = "";
 
-    for (const endpoint of state.endpoints) {
-        els.endpointList.appendChild(createEndpointRow(withKnownEndpointDiff(endpoint)));
+    const groups = groupEndpointsByTag(state.endpoints);
+    if (groups.length > 0) {
+        els.endpointList.appendChild(createTagToolbar(groups));
+    }
+
+    for (const group of groups) {
+        const open = isTagGroupOpen(group.tag);
+        const section = document.createElement("div");
+        section.className = `tag-group ${open ? "" : "collapsed"}`;
+
+        const header = document.createElement("button");
+        header.type = "button";
+        header.className = "tag-group-header";
+        header.setAttribute("aria-expanded", String(open));
+        header.innerHTML = `
+            <i data-lucide="chevron-down"></i>
+            <span class="tag-group-name">${escapeHtml(group.tag)}</span>
+            <span class="tag-group-count">${group.endpoints.length}</span>
+        `;
+        header.addEventListener("click", () => {
+            state.tagOpen.set(group.tag, !isTagGroupOpen(group.tag));
+            renderEndpoints();
+        });
+        section.appendChild(header);
+
+        if (open) {
+            const body = document.createElement("div");
+            body.className = "tag-group-body";
+            for (const endpoint of group.endpoints) {
+                body.appendChild(createEndpointRow(withKnownEndpointDiff(endpoint)));
+            }
+            section.appendChild(body);
+        }
+
+        els.endpointList.appendChild(section);
     }
 
     refreshIcons();
+}
+
+const untaggedLabel = "Untagged";
+
+function groupEndpointsByTag(endpoints) {
+    const query = state.tagSearch ? els.endpointSearch.value.trim().toLowerCase() : "";
+    const groups = new Map();
+    for (const endpoint of endpoints) {
+        const tags = endpoint.tags?.length ? endpoint.tags : [untaggedLabel];
+        for (const tag of tags) {
+            if (query && !tag.toLowerCase().includes(query)) {
+                continue;
+            }
+
+            if (!groups.has(tag)) {
+                groups.set(tag, []);
+            }
+            groups.get(tag).push(endpoint);
+        }
+    }
+
+    return [...groups.entries()]
+        .map(([tag, items]) => ({ tag, endpoints: items }))
+        .sort((a, b) => a.tag.localeCompare(b.tag, undefined, { sensitivity: "base" }));
+}
+
+function isTagGroupOpen(tag) {
+    if (state.tagOpen.has(tag)) {
+        return state.tagOpen.get(tag);
+    }
+
+    // While searching, show matches expanded; otherwise start collapsed.
+    return els.endpointSearch.value.trim().length > 0;
+}
+
+function createTagToolbar(groups) {
+    const toolbar = document.createElement("div");
+    toolbar.className = "tag-toolbar";
+    const make = (label, icon, open) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "tag-toolbar-button";
+        button.innerHTML = `<i data-lucide="${icon}"></i><span>${label}</span>`;
+        button.addEventListener("click", () => {
+            for (const group of groups) {
+                state.tagOpen.set(group.tag, open);
+            }
+            renderEndpoints();
+        });
+        return button;
+    };
+    toolbar.append(make("Expand all", "chevrons-down-up", true), make("Collapse all", "chevrons-up-down", false));
+    return toolbar;
 }
 
 function renderFavorites() {
@@ -1625,7 +1741,8 @@ function renderGraph(graph) {
                     textMaxWidth: metrics.textMaxWidth,
                     fontSize: metrics.fontSize,
                     cardImage: metrics.cardImage || "",
-                    tags: node.tags || []
+                    tags: node.tags || [],
+                    children: node.children || []
                 }
             };
         }),
@@ -2289,6 +2406,10 @@ function renderNodeSummary(data, compact) {
         }
     }
 
+    if (!compact) {
+        html += renderChildModels(data.children);
+    }
+
     if (enumValues.length > 0) {
         html += compact
             ? `<div class="enum-chip-row compact">${renderEnumChips(enumValues)}</div>`
@@ -2323,6 +2444,19 @@ function renderNodeSummary(data, compact) {
     }
 
     return html;
+}
+
+function renderChildModels(children) {
+    if (!children?.length) {
+        return "";
+    }
+
+    return `
+        <div class="detail-block">
+            <div class="detail-label">Derived models (${children.length})</div>
+            <div class="tag-row">${children.map(child => `<button type="button" class="tag child-model-chip" data-open-schema-id="${escapeHtml(child.id)}" title="Open ${escapeHtml(child.name)}">${escapeHtml(child.name)}</button>`).join("")}</div>
+        </div>
+    `;
 }
 
 function renderPropertyRow(prop) {
@@ -2647,6 +2781,15 @@ function renderSimilarModelResult(result) {
     `;
 }
 
+function openSchemaById(schemaId) {
+    if (!schemaId) {
+        return;
+    }
+
+    const cached = state.schemaCache.get(schemaId);
+    openSchemaExplorer(cached || { id: schemaId, kind: "schema", label: stripSchemaPrefix(schemaId) });
+}
+
 async function openSimilarSchema(schemaId) {
     if (!schemaId) {
         return;
@@ -2703,6 +2846,7 @@ function renderSchemaTreeNode(schema, pathKey, trail, depth) {
                 </button>
             </div>
             ${renderDiffEntries(schema)}
+            ${renderChildModels(schema.children)}
             ${enumHtml}
             ${propertiesHtml}
         </div>
@@ -2825,6 +2969,7 @@ function normalizeSchema(schema, fullyLoaded = false) {
         description: schema.description,
         properties,
         enumValues,
+        children: schema.children || [],
         nullable: schema.nullable,
         cycleId: schema.cycleId,
         diffState: schema.diffState,

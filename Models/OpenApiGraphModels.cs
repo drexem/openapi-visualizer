@@ -40,11 +40,18 @@ public sealed class SchemaInfo
     public string? Description { get; init; }
     public IReadOnlyList<SchemaPropertyInfo> Properties { get; init; } = [];
     public IReadOnlyList<string> EnumValues { get; init; } = [];
+    public IReadOnlyList<SchemaRefInfo> Children { get; init; } = [];
     public int OutgoingReferenceCount { get; init; }
     public int IncomingReferenceCount { get; set; }
     public int? CycleId { get; set; }
     public string? DiffState { get; init; }
     public IReadOnlyList<DiffEntry> DiffEntries { get; init; } = [];
+}
+
+public sealed class SchemaRefInfo
+{
+    public required string Id { get; init; }
+    public required string Name { get; init; }
 }
 
 public sealed class SchemaPropertyInfo
@@ -80,6 +87,11 @@ public sealed class SchemaEdge
     public required string TargetSchemaId { get; init; }
     public required string Kind { get; init; }
     public required string Label { get; init; }
+
+    // allOf edges are stored child -> parent; displayed inheritance edges always point parent -> child.
+    public bool ChildToParent { get; init; }
+    public string DisplaySourceId => ChildToParent ? TargetSchemaId : SourceSchemaId;
+    public string DisplayTargetId => ChildToParent ? SourceSchemaId : TargetSchemaId;
 }
 
 public sealed class CycleInfo
@@ -123,6 +135,7 @@ public sealed class GraphNode
     public IReadOnlyList<SchemaPropertyInfo> Properties { get; init; } = [];
     public IReadOnlyList<string> EnumValues { get; init; } = [];
     public IReadOnlyList<string> Tags { get; init; } = [];
+    public IReadOnlyList<SchemaRefInfo> Children { get; init; } = [];
     public string? DiffState { get; init; }
     public IReadOnlyList<DiffEntry> DiffEntries { get; init; } = [];
 }
