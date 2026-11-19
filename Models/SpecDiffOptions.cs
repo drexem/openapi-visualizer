@@ -60,6 +60,15 @@ public sealed class SpecSourceOptions
     /// <summary>Optional Azure DevOps details, required only for pull-request lookup.</summary>
     public AzureDevOpsOptions? Ado { get; set; }
 
+    /// <summary>
+    /// Optional. Where this source's own build already writes a finished spec next to its source
+    /// files - e.g. a local build writing a bundled <c>openapi.json</c> into the worktree. Supports <c>{repo}</c>/<c>{tree}</c>, both of which resolve to
+    /// the worktree path when loading a live worktree (see <see cref="SpecBundler.GetWorktreeSpecAsync"/>).
+    /// Checked first; <see cref="Steps"/> only run when it is missing. Not used for commit-based
+    /// diffing, since <c>git archive</c> never has a build's output.
+    /// </summary>
+    public string? PrebuiltFile { get; set; }
+
     public string ResolveWorkingDirectory() =>
         string.IsNullOrWhiteSpace(WorkingDirectory) ? RepoPath : WorkingDirectory;
 }

@@ -42,6 +42,13 @@
                 <div class="section-body repo-body">
                     <select id="diffSourceSelect" class="repo-select" aria-label="Spec source"></select>
 
+                    <div class="repo-row repo-row-worktree">
+                        <select id="worktreeSelect" class="repo-select" aria-label="Worktree"></select>
+                        <button id="worktreeLoadButton" class="repo-button" type="button" title="Load this worktree's current spec, bundling it first if needed">
+                            <i data-lucide="folder-git-2"></i>
+                        </button>
+                    </div>
+
                     <div class="repo-row">
                         <input id="prInput" type="number" min="1" step="1" placeholder="Pull request number" autocomplete="off">
                         <button id="prLoadButton" class="repo-button" type="button" title="Diff this pull request">
@@ -244,6 +251,24 @@
             <button id="detailsExpandButton" class="details-expand-button hidden" type="button" title="Show details" aria-label="Show details">
                 <i data-lucide="chevron-left"></i>
             </button>
+            <div class="shortcuts-menu">
+                <div id="shortcutsPanel" class="shortcuts-panel hidden" role="dialog" aria-label="Keyboard shortcuts">
+                    <div class="shortcuts-title">Keyboard shortcuts</div>
+                    <dl class="shortcuts-list">
+                        <dt><kbd>Ctrl</kbd>+click</dt><dd>Add or remove a node from the selection</dd>
+                        <dt><kbd>D</kbd></dt><dd>Model details (2 selected: side by side)</dd>
+                        <dt><kbd>I</kbd></dt><dd>Show incoming references</dd>
+                        <dt><kbd>O</kbd></dt><dd>Show outgoing references</dd>
+                        <dt><kbd>S</kbd></dt><dd>Similar models</dd>
+                        <dt><kbd>H</kbd></dt><dd>Unselect the endpoint/model (remove it from the graph)</dd>
+                        <dt><kbd>?</kbd></dt><dd>Show or hide this list</dd>
+                        <dt><kbd>Esc</kbd></dt><dd>Close the open dialog</dd>
+                    </dl>
+                </div>
+                <button id="shortcutsButton" class="shortcuts-button" type="button" title="Keyboard shortcuts" aria-label="Keyboard shortcuts" aria-expanded="false">
+                    <i data-lucide="keyboard"></i>
+                </button>
+            </div>
         </section>
 
         <div class="resize-handle resize-handle-right" data-resize-panel="right" role="separator" aria-orientation="vertical" aria-label="Resize right panel"></div>

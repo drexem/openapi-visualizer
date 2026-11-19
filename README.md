@@ -72,6 +72,18 @@ server; set the `ADO_PAT` environment variable to a PAT with Code (read) scope o
 Azure DevOps Services and Azure DevOps Server / TFS are supported. GitHub and GitLab are not yet
 implemented — diffing two refs works with any git remote.
 
+## Endpoint permissions
+
+If your spec stores per-operation authorization data in a vendor extension, the endpoint details
+panel can show it as "Permissions". Configure it in `appsettings.Local.json`:
+
+```jsonc
+"EndpointDetails": {
+  "PermissionsExtension": "x-acme-authorize", // operation-level extension name
+  "PermissionsProperty": "claims"             // omit when the extension itself is a string array
+}
+```
+
 ## Sample
 
 `samples/tiny-openapi.json` contains a small model cycle for local testing.

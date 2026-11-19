@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 using OpenApiVisualizer.Models;
 
 namespace OpenApiVisualizer.Services;
@@ -14,6 +15,12 @@ public sealed class OpenApiSpecStore
     };
 
     private readonly ConcurrentDictionary<string, OpenApiIndex> _specs = new(StringComparer.Ordinal);
+    private readonly EndpointDetailsOptions _detailsOptions;
+
+    public OpenApiSpecStore(IOptions<EndpointDetailsOptions> detailsOptions)
+    {
+        _detailsOptions = detailsOptions.Value;
+    }
 
     public string? CurrentSpecId { get; private set; }
 
@@ -52,7 +59,7 @@ public sealed class OpenApiSpecStore
         };
 
         using var document = JsonDocument.Parse(bytes, options);
-        var index = OpenApiIndexBuilder.Build(specId, fileName, document.RootElement);
+        var index = OpenApiIndexBuilder.Build(specId, fileName, document.RootElement, _detailsOptions);
         _specs[specId] = index;
         if (makeCurrent)
         {
@@ -151,6 +158,22 @@ public sealed class OpenApiSpecStore
         return OpenApiDiffBuilder.GetSchema(baseIndex, compareIndex, schemaIdOrName);
     }
 
+    public EndpointDetails? GetEndpointDetails(string specId, string endpointId, string? compareSpecId)
+    {
+        // In diff mode prefer the newer spec, falling back to the base for deleted endpoints.
+        if (!string.IsNullOrWhiteSpace(compareSpecId) &&
+            _specs.TryGetValue(compareSpecId, out var compareIndex) &&
+            compareIndex.EndpointDetails.TryGetValue(endpointId, out var compareDetails))
+        {
+            return compareDetails;
+        }
+
+        return _specs.TryGetValue(specId, out var index) &&
+               index.EndpointDetails.TryGetValue(endpointId, out var details)
+            ? details
+            : null;
+    }
+
     public SpecDiffSummary? GetDiffSummary(string baseSpecId, string compareSpecId)
     {
         return _specs.TryGetValue(baseSpecId, out var baseIndex) &&
@@ -196,6 +219,7 @@ internal sealed class OpenApiIndex
 {
     public required SpecSummary Summary { get; init; }
     public required IReadOnlyDictionary<string, EndpointInfo> Endpoints { get; init; }
+    public required IReadOnlyDictionary<string, EndpointDetails> EndpointDetails { get; init; }
     public required IReadOnlyDictionary<string, SchemaInfo> Schemas { get; init; }
     public required IReadOnlyDictionary<string, IReadOnlyList<SchemaEdge>> SchemaEdges { get; init; }
     public required IReadOnlyList<CycleInfo> Cycles { get; init; }
@@ -1767,7 +1791,7 @@ internal static class OpenApiDiffBuilder
 
 internal static class OpenApiIndexBuilder
 {
-    public static OpenApiIndex Build(string specId, string fileName, JsonElement root)
+    public static OpenApiIndex Build(string specId, string fileName, JsonElement root, EndpointDetailsOptions detailsOptions)
     {
         var schemas = ReadSchemas(root);
         var schemaEdges = ReadSchemaEdges(root, schemas.Keys);
@@ -1792,6 +1816,7 @@ internal static class OpenApiIndexBuilder
         {
             Summary = summary,
             Endpoints = endpoints.ToDictionary(endpoint => endpoint.Id, StringComparer.Ordinal),
+            EndpointDetails = ReadEndpointDetails(root, detailsOptions).ToDictionary(details => details.Id, StringComparer.Ordinal),
             Schemas = schemas,
             SchemaEdges = schemaEdges.ToDictionary(x => x.Key, x => (IReadOnlyList<SchemaEdge>)x.Value, StringComparer.Ordinal),
             Cycles = cycles
@@ -2057,6 +2082,242 @@ internal static class OpenApiIndexBuilder
             .OrderBy(endpoint => endpoint.Path, StringComparer.OrdinalIgnoreCase)
             .ThenBy(endpoint => endpoint.Method, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static IReadOnlyList<string> ReadPermissions(JsonElement operation, EndpointDetailsOptions options)
+    {
+        if (string.IsNullOrWhiteSpace(options.PermissionsExtension) ||
+            !operation.TryGetProperty(options.PermissionsExtension, out var extension))
+        {
+            return [];
+        }
+
+        if (!string.IsNullOrWhiteSpace(options.PermissionsProperty))
+        {
+            return ReadStringArray(extension, options.PermissionsProperty);
+        }
+
+        return extension.ValueKind == JsonValueKind.Array
+            ? extension.EnumerateArray()
+                .Where(item => item.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(item.GetString()))
+                .Select(item => item.GetString()!)
+                .ToArray()
+            : [];
+    }
+
+    private static IReadOnlyList<EndpointDetails> ReadEndpointDetails(JsonElement root, EndpointDetailsOptions detailsOptions)
+    {
+        var details = new List<EndpointDetails>();
+        if (!root.TryGetProperty("paths", out var paths) || paths.ValueKind != JsonValueKind.Object)
+        {
+            return details;
+        }
+
+        var globalSecurity = root.TryGetProperty("security", out var rootSecurity) ? ReadSecurity(rootSecurity) : [];
+        foreach (var pathProperty in paths.EnumerateObject())
+        {
+            if (pathProperty.Value.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var pathParameters = pathProperty.Value.TryGetProperty("parameters", out var pathParametersElement)
+                ? ReadParameters(root, pathParametersElement)
+                : [];
+
+            foreach (var operationProperty in pathProperty.Value.EnumerateObject())
+            {
+                if (!IsHttpMethod(operationProperty.Name) || operationProperty.Value.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var operation = operationProperty.Value;
+                var method = operationProperty.Name.ToUpperInvariant();
+                var operationParameters = operation.TryGetProperty("parameters", out var operationParametersElement)
+                    ? ReadParameters(root, operationParametersElement)
+                    : [];
+
+                // Operation-level parameters override path-level ones with the same name and location.
+                var parameters = pathParameters
+                    .Where(pathParameter => !operationParameters.Any(operationParameter =>
+                        string.Equals(operationParameter.Name, pathParameter.Name, StringComparison.Ordinal) &&
+                        string.Equals(operationParameter.In, pathParameter.In, StringComparison.Ordinal)))
+                    .Concat(operationParameters)
+                    .ToArray();
+
+                details.Add(new EndpointDetails
+                {
+                    Id = $"{method} {pathProperty.Name}",
+                    Method = method,
+                    Path = pathProperty.Name,
+                    Summary = ReadString(operation, "summary"),
+                    Description = ReadString(operation, "description"),
+                    OperationId = ReadString(operation, "operationId"),
+                    Deprecated = ReadBool(operation, "deprecated"),
+                    Tags = ReadStringArray(operation, "tags"),
+                    Parameters = parameters,
+                    RequestBody = operation.TryGetProperty("requestBody", out var requestBody)
+                        ? ReadRequestBody(root, requestBody)
+                        : null,
+                    Responses = operation.TryGetProperty("responses", out var responses)
+                        ? ReadResponses(root, responses)
+                        : [],
+                    Security = operation.TryGetProperty("security", out var operationSecurity)
+                        ? ReadSecurity(operationSecurity)
+                        : globalSecurity,
+                    Permissions = ReadPermissions(operation, detailsOptions)
+                });
+            }
+        }
+
+        return details;
+    }
+
+    private static IReadOnlyList<EndpointParameterInfo> ReadParameters(JsonElement root, JsonElement parameters)
+    {
+        parameters = ResolveIfNeeded(root, parameters);
+        if (parameters.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var result = new List<EndpointParameterInfo>();
+        foreach (var parameter in parameters.EnumerateArray())
+        {
+            var resolved = ResolveIfNeeded(root, parameter);
+            if (resolved.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            var schema = resolved.TryGetProperty("schema", out var schemaElement) ? schemaElement : default;
+            var schemaRefId = TryDirectSchemaRef(schema, out var refId) ? refId : null;
+            var valueSchema = schemaRefId is not null && TryGetSchemaElement(root, schemaRefId, out var refSchema)
+                ? refSchema
+                : schema;
+            result.Add(new EndpointParameterInfo
+            {
+                Name = ReadString(resolved, "name") ?? "parameter",
+                In = ReadString(resolved, "in") ?? "query",
+                Required = ReadBool(resolved, "required"),
+                Deprecated = ReadBool(resolved, "deprecated"),
+                Description = ReadString(resolved, "description"),
+                Type = ReadType(schema),
+                Format = ReadString(valueSchema, "format"),
+                SchemaRefId = schemaRefId,
+                Default = ReadScalar(valueSchema, "default"),
+                Example = ReadScalar(resolved, "example") ?? ReadScalar(valueSchema, "example"),
+                EnumValues = ReadEnumValues(valueSchema)
+            });
+        }
+
+        return result;
+    }
+
+    private static EndpointRequestBodyInfo? ReadRequestBody(JsonElement root, JsonElement requestBody)
+    {
+        requestBody = ResolveIfNeeded(root, requestBody);
+        if (requestBody.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        return new EndpointRequestBodyInfo
+        {
+            Required = ReadBool(requestBody, "required"),
+            Description = ReadString(requestBody, "description"),
+            Content = ReadMediaTypes(requestBody)
+        };
+    }
+
+    private static IReadOnlyList<EndpointResponseInfo> ReadResponses(JsonElement root, JsonElement responses)
+    {
+        if (responses.ValueKind != JsonValueKind.Object)
+        {
+            return [];
+        }
+
+        return responses.EnumerateObject()
+            .Select(response =>
+            {
+                var resolved = ResolveIfNeeded(root, response.Value);
+                return new EndpointResponseInfo
+                {
+                    Status = response.Name,
+                    Description = ReadString(resolved, "description"),
+                    Content = ReadMediaTypes(resolved)
+                };
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<EndpointMediaTypeInfo> ReadMediaTypes(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object ||
+            !element.TryGetProperty("content", out var content) ||
+            content.ValueKind != JsonValueKind.Object)
+        {
+            return [];
+        }
+
+        return content.EnumerateObject()
+            .Select(mediaType =>
+            {
+                var schema = mediaType.Value.ValueKind == JsonValueKind.Object &&
+                             mediaType.Value.TryGetProperty("schema", out var schemaElement)
+                    ? schemaElement
+                    : default;
+                string? schemaRefId = TryDirectSchemaRef(schema, out var refId) || TryArrayItemsRef(schema, out refId)
+                    ? refId
+                    : null;
+                return new EndpointMediaTypeInfo
+                {
+                    MediaType = mediaType.Name,
+                    Type = schema.ValueKind == JsonValueKind.Undefined ? null : ReadType(schema),
+                    SchemaRefId = schemaRefId
+                };
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> ReadSecurity(JsonElement security)
+    {
+        if (security.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        return security.EnumerateArray()
+            .Where(requirement => requirement.ValueKind == JsonValueKind.Object)
+            .SelectMany(requirement => requirement.EnumerateObject())
+            .Select(scheme =>
+            {
+                var scopes = scheme.Value.ValueKind == JsonValueKind.Array
+                    ? scheme.Value.EnumerateArray()
+                        .Where(scope => scope.ValueKind == JsonValueKind.String)
+                        .Select(scope => scope.GetString()!)
+                        .ToArray()
+                    : [];
+                return scopes.Length == 0 ? scheme.Name : $"{scheme.Name} ({string.Join(", ", scopes)})";
+            })
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static string? ReadScalar(JsonElement element, string propertyName)
+    {
+        if (element.ValueKind != JsonValueKind.Object || !element.TryGetProperty(propertyName, out var value))
+        {
+            return null;
+        }
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString(),
+            JsonValueKind.Null => null,
+            _ => value.GetRawText()
+        };
     }
 
     private static void AddContentSchemaUses(

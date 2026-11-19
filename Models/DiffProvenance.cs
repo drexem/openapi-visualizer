@@ -26,6 +26,9 @@ public sealed class DiffProvenance
 
     public bool BaseFromCache { get; init; }
     public bool HeadFromCache { get; init; }
+
+    /// <summary>True when both commits build the exact same spec, i.e. the change does not touch the API.</summary>
+    public bool SpecsIdentical { get; init; }
     public double PrepareSeconds { get; init; }
 }
 

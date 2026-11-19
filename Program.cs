@@ -9,6 +9,7 @@ var builder = WebApplication.CreateBuilder(args);
 // See appsettings.Local.example.json.
 builder.Configuration.AddJsonFile("appsettings.Local.json", optional: true, reloadOnChange: true);
 
+builder.Services.Configure<EndpointDetailsOptions>(builder.Configuration.GetSection(EndpointDetailsOptions.SectionName));
 builder.Services.AddSingleton<OpenApiSpecStore>();
 builder.Services.Configure<FormOptions>(options =>
 {
@@ -32,7 +33,12 @@ builder.Services.AddHttpClient(PullRequestResolver.HttpClientName)
 var app = builder.Build();
 
 app.UseDefaultFiles();
-app.UseStaticFiles();
+app.UseStaticFiles(new StaticFileOptions
+{
+    // Without an explicit header browsers cache app.js/styles.css heuristically and keep running
+    // the old UI after an edit; "no-cache" makes them revalidate (cheap 304 via ETag) every load.
+    OnPrepareResponse = context => context.Context.Response.Headers.CacheControl = "no-cache"
+});
 
 app.MapPost("/api/specs/import", async (HttpRequest request, OpenApiSpecStore store, CancellationToken cancellationToken) =>
 {
@@ -98,6 +104,23 @@ app.MapGet("/api/specs/{specId}/endpoints", (
     return Results.Ok(store.SearchEndpoints(specId, query, method, limit ?? 100, tagOnly ?? false));
 });
 
+app.MapGet("/api/specs/{specId}/endpoints/details", (
+    string specId,
+    string? endpointId,
+    string? compareSpecId,
+    OpenApiSpecStore store) =>
+{
+    if (string.IsNullOrWhiteSpace(endpointId))
+    {
+        return Results.BadRequest(new { error = "Provide an endpointId query parameter." });
+    }
+
+    var details = store.GetEndpointDetails(specId, endpointId, compareSpecId);
+    return details is null
+        ? Results.NotFound(new { error = $"Endpoint '{endpointId}' was not found." })
+        : Results.Ok(details);
+});
+
 app.MapGet("/api/specs/{specId}/models", (
     string specId,
     string? query,
@@ -149,6 +172,20 @@ app.MapGet("/api/diff/sources", (SpecBundler bundler) =>
     }));
 });
 
+app.MapGet("/api/diff/sources/{name}/worktrees", async (
+    string name,
+    SpecDiffCoordinator coordinator,
+    SpecBundler bundler,
+    CancellationToken cancellationToken) =>
+{
+    return await RunAsync(async () =>
+    {
+        var source = coordinator.ResolveSource(name);
+        var worktrees = await bundler.ListWorktreesAsync(source, cancellationToken);
+        return worktrees.Select(w => new { path = w.Path, branch = w.Branch, locked = w.Locked }).ToArray();
+    });
+});
+
 app.MapPost("/api/diff/from-refs", async (
     RefDiffRequest request,
     SpecDiffCoordinator coordinator,
@@ -177,9 +214,27 @@ app.MapPost("/api/diff/from-pr", async (
         request.Source, request.PullRequestId, cancellationToken));
 });
 
-// Build failures are expected traffic here (bad ref, unreachable server, failing merge tool),
-// so surface the message instead of a 500 with a stack trace.
-static async Task<IResult> RunAsync(Func<Task<SpecDiffSummary>> action)
+app.MapPost("/api/specs/load-worktree", async (
+    WorktreeLoadRequest request,
+    SpecDiffCoordinator coordinator,
+    CancellationToken cancellationToken) =>
+{
+    if (string.IsNullOrWhiteSpace(request.WorktreePath))
+    {
+        return Results.BadRequest(new { error = "Provide a worktreePath." });
+    }
+
+    return await RunAsync(async () =>
+    {
+        var (summary, sourceName, worktreePath, fromPrebuilt) =
+            await coordinator.LoadWorktreeAsync(request.Source, request.WorktreePath.Trim(), cancellationToken);
+        return new WorktreeLoadResponse(summary, sourceName, worktreePath, fromPrebuilt);
+    });
+});
+
+// Build failures are expected traffic here (bad ref, unreachable server, failing merge tool,
+// missing worktree), so surface the message instead of a 500 with a stack trace.
+static async Task<IResult> RunAsync<T>(Func<Task<T>> action)
 {
     try
     {
@@ -196,3 +251,7 @@ app.Run();
 internal sealed record RefDiffRequest(string? Source, string? BaseRef, string? HeadRef);
 
 internal sealed record PullRequestDiffRequest(string? Source, int PullRequestId);
+
+internal sealed record WorktreeLoadRequest(string? Source, string? WorktreePath);
+
+internal sealed record WorktreeLoadResponse(SpecSummary Summary, string SourceName, string WorktreePath, bool FromPrebuilt);

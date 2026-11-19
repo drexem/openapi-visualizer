@@ -49,11 +49,6 @@ public sealed class SpecDiffCoordinator
         var baseCommit = await _bundler.ResolveCommitAsync(source, baseRef, cancellationToken);
         var headCommit = await _bundler.ResolveCommitAsync(source, headRef, cancellationToken);
 
-        if (string.Equals(baseCommit, headCommit, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new SpecBuildException($"'{baseRef}' and '{headRef}' are the same commit - there is nothing to diff.");
-        }
-
         return await BuildDiffAsync(
             source,
             baseCommit,
@@ -207,11 +202,14 @@ public sealed class SpecDiffCoordinator
         var baseSummary = await ImportAsync(basePath, $"{source.Name} @ {Short(baseCommit)}", makeCurrent: true, cancellationToken);
         var headSummary = await ImportAsync(headPath, $"{source.Name} @ {Short(headCommit)}", makeCurrent: false, cancellationToken);
 
-        if (string.Equals(baseSummary.SpecId, headSummary.SpecId, StringComparison.Ordinal))
+        // Identical specs (same commit, or a change that doesn't touch the API) still produce a
+        // valid, empty diff, so the base spec can be browsed as usual.
+        var identical = string.Equals(baseSummary.SpecId, headSummary.SpecId, StringComparison.Ordinal);
+        if (identical)
         {
-            throw new SpecBuildException(
-                $"The specs built from {Short(baseCommit)} and {Short(headCommit)} are byte-identical - " +
-                "this change does not touch the API surface.");
+            _logger.LogInformation(
+                "Specs built from {Base} and {Head} are identical; loading an empty diff.",
+                Short(baseCommit), Short(headCommit));
         }
 
         var diff = _store.GetDiffSummary(baseSummary.SpecId, headSummary.SpecId)
@@ -232,10 +230,34 @@ public sealed class SpecDiffCoordinator
             BaseSummary = baseSummary,
             BaseFromCache = baseCached,
             HeadFromCache = headCached,
+            SpecsIdentical = identical,
             PrepareSeconds = Math.Round(stopwatch.Elapsed.TotalSeconds, 1)
         };
 
         return diff;
+    }
+
+    /// <summary>
+    /// Loads a worktree's current spec - uncommitted changes included - as the active spec, building
+    /// it first if the worktree hasn't been built yet. Unlike <see cref="DiffRefsAsync"/> this is not
+    /// a diff: it just makes that spec current, same as uploading a file.
+    /// </summary>
+    public async Task<(SpecSummary Summary, string SourceName, string WorktreePath, bool FromPrebuilt)> LoadWorktreeAsync(
+        string? sourceName,
+        string worktreePath,
+        CancellationToken cancellationToken)
+    {
+        var source = ResolveSource(sourceName);
+        var (path, fromPrebuilt) = await _bundler.GetWorktreeSpecAsync(source, worktreePath, cancellationToken);
+        var label = $"{source.Name} ({WorktreeLabel(worktreePath)})";
+        var summary = await ImportAsync(path, label, makeCurrent: true, cancellationToken);
+        return (summary, source.Name, worktreePath, fromPrebuilt);
+    }
+
+    private static string WorktreeLabel(string worktreePath)
+    {
+        var name = Path.GetFileName(worktreePath.TrimEnd('\\', '/'));
+        return string.IsNullOrEmpty(name) ? worktreePath : name;
     }
 
     private async Task<SpecSummary> ImportAsync(

@@ -14,7 +14,8 @@ const panelWidthDefaults = {
     left: 360,
     right: 360,
     min: 260,
-    max: 560
+    // Space always left for the graph canvas (plus the resize handles) when a panel is dragged wider.
+    graphReserve: 372
 };
 
 const schemaExplorerMaxDepth = 24;
@@ -44,10 +45,13 @@ const state = {
     currentDetailsNode: null,
     schemaCache: new Map(),
     schemaExplorerLoadErrors: new Set(),
-    schemaExplorerRootId: null,
+    // One entry per explorer pane: one for the normal view, two when comparing models side by side.
+    schemaExplorerRootIds: [],
     schemaExplorerExpanded: new Set(),
     schemaExplorerRows: new Map(),
-    similarModelsTarget: null
+    similarModelsTarget: null,
+    // Graph node ids in the order they were selected, so "D" can put the first pick on the left.
+    graphSelectionOrder: []
 };
 
 const els = {
@@ -59,6 +63,8 @@ const els = {
     compareFileInput: document.getElementById("compareFileInput"),
     repoPanel: document.getElementById("repoPanel"),
     diffSourceSelect: document.getElementById("diffSourceSelect"),
+    worktreeSelect: document.getElementById("worktreeSelect"),
+    worktreeLoadButton: document.getElementById("worktreeLoadButton"),
     prInput: document.getElementById("prInput"),
     prLoadButton: document.getElementById("prLoadButton"),
     baseRefInput: document.getElementById("baseRefInput"),
@@ -126,6 +132,8 @@ const els = {
     schemaExplorerTitle: document.getElementById("schemaExplorerTitle"),
     schemaExplorerBadge: document.getElementById("schemaExplorerBadge"),
     schemaExplorerBody: document.getElementById("schemaExplorerBody"),
+    shortcutsButton: document.getElementById("shortcutsButton"),
+    shortcutsPanel: document.getElementById("shortcutsPanel"),
     similarModelsOverlay: document.getElementById("similarModelsOverlay"),
     similarModelsCloseButton: document.getElementById("similarModelsCloseButton"),
     similarModelsTitle: document.getElementById("similarModelsTitle"),
@@ -167,6 +175,7 @@ function wireEvents() {
         }
     });
     els.refLoadButton?.addEventListener("click", loadRefDiff);
+    els.worktreeLoadButton?.addEventListener("click", loadWorktreeSpec);
     [els.baseRefInput, els.headRefInput].forEach(input => {
         input?.addEventListener("keydown", event => {
             if (event.key === "Enter") {
@@ -289,7 +298,32 @@ function wireEvents() {
         const childChip = event.target.closest("[data-open-schema-id]");
         if (childChip) {
             event.preventDefault();
-            openSchemaById(childChip.dataset.openSchemaId);
+            const pane = childChip.closest("[data-schema-pane]");
+            replaceSchemaExplorerPane(Number(pane?.dataset.schemaPane) || 0, childChip.dataset.openSchemaId);
+            return;
+        }
+
+        const derivedAllButton = event.target.closest("[data-schema-derived-all]");
+        if (derivedAllButton) {
+            event.preventDefault();
+            setSchemaExplorerDerivedExpanded(
+                derivedAllButton.dataset.schemaDerivedAll,
+                Number(derivedAllButton.dataset.schemaDerivedCount) || 0,
+                derivedAllButton.dataset.schemaDerivedExpand === "true");
+            return;
+        }
+
+        const swapButton = event.target.closest("[data-schema-pane-swap]");
+        if (swapButton) {
+            event.preventDefault();
+            swapSchemaExplorerPanes();
+            return;
+        }
+
+        const closePaneButton = event.target.closest("[data-schema-pane-close]");
+        if (closePaneButton) {
+            event.preventDefault();
+            closeSchemaExplorerPane(Number(closePaneButton.dataset.schemaPaneClose));
             return;
         }
 
@@ -347,10 +381,23 @@ function wireEvents() {
     els.layoutButton.addEventListener("click", runLayout);
     els.fitButton.addEventListener("click", () => state.cy?.fit(undefined, 40));
     els.showChangesButton?.addEventListener("click", showAllChanges);
-    document.addEventListener("click", () => setSettingsOpen(false));
+    els.shortcutsButton?.addEventListener("click", event => {
+        event.stopPropagation();
+        setShortcutsOpen(els.shortcutsPanel.classList.contains("hidden"));
+    });
+    els.shortcutsPanel?.addEventListener("click", event => event.stopPropagation());
+    document.addEventListener("click", () => {
+        setSettingsOpen(false);
+        setShortcutsOpen(false);
+    });
     document.addEventListener("keydown", handleGraphKeyboardShortcut);
     document.addEventListener("keydown", event => {
         if (event.key === "Escape") {
+            if (!els.shortcutsPanel?.classList.contains("hidden")) {
+                setShortcutsOpen(false);
+                return;
+            }
+
             if (!els.similarModelsOverlay?.classList.contains("hidden")) {
                 closeSimilarModelsOverlay();
                 return;
@@ -432,8 +479,10 @@ function setPanelWidth(panel, width) {
     document.documentElement.style.setProperty(`--${panel}-panel-width`, `${clampPanelWidth(width)}px`);
 }
 
-function clampPanelWidth(width, fallback = panelWidthDefaults.left) {
-    return Math.max(panelWidthDefaults.min, Math.min(panelWidthDefaults.max, Number(width) || fallback));
+function clampPanelWidth(width, fallback = panelWidthDefaults.left, otherPanelWidth = 0) {
+    // No fixed cap: a panel may grow until only the graph's minimum width (and the other panel) remains.
+    const max = Math.max(panelWidthDefaults.min, window.innerWidth - panelWidthDefaults.graphReserve - otherPanelWidth);
+    return Math.max(panelWidthDefaults.min, Math.min(max, Number(width) || fallback));
 }
 
 function startPanelResize(event) {
@@ -457,7 +506,9 @@ function startPanelResize(event) {
     function onMove(moveEvent) {
         const delta = moveEvent.clientX - startX;
         const nextWidth = panel === "left" ? startWidth + delta : startWidth - delta;
-        widths[panel] = clampPanelWidth(nextWidth);
+        const other = panel === "left" ? "right" : "left";
+        const otherWidth = other === "right" && state.detailsCollapsed ? 0 : widths[other];
+        widths[panel] = clampPanelWidth(nextWidth, startWidth, otherWidth);
         setPanelWidth(panel, widths[panel]);
         state.cy?.resize();
     }
@@ -486,7 +537,27 @@ function handleGraphKeyboardShortcut(event) {
         return;
     }
 
+    if (event.key === "?") {
+        event.preventDefault();
+        setShortcutsOpen(els.shortcutsPanel.classList.contains("hidden"));
+        return;
+    }
+
     const key = event.key.toLowerCase();
+    if (key === "d") {
+        // Ctrl is allowed so the shortcut still works while the user is holding it from Ctrl+clicking
+        // the nodes; preventDefault stops the browser's Ctrl+D bookmark prompt.
+        event.preventDefault();
+        openSelectedModelDetails();
+        return;
+    }
+
+    if (key === "h") {
+        event.preventDefault();
+        unselectGraphNodes();
+        return;
+    }
+
     if (key !== "i" && key !== "o" && key !== "s") {
         return;
     }
@@ -507,13 +578,62 @@ function handleGraphKeyboardShortcut(event) {
     }
 }
 
-function selectedGraphNodeData() {
-    const selected = state.cy?.nodes(":selected");
-    if (!selected || selected.length === 0) {
-        return null;
+// "H" on selected graph nodes removes the matching endpoints/models from the sidebar selection,
+// the same as clicking them off in the list.
+function unselectGraphNodes() {
+    const nodes = selectedGraphNodesInOrder();
+    if (nodes.length === 0) {
+        setStatus("Select a graph node first");
+        return;
     }
 
-    return selected[selected.length - 1].data();
+    const ids = nodes.map(node => node.id()).filter(id => state.selected.has(id));
+    if (ids.length === 0) {
+        setStatus("Only selected endpoints or models (highlighted roots) can be unselected");
+        return;
+    }
+
+    ids.forEach(id => state.selected.delete(id));
+    renderFavorites();
+    renderEndpoints();
+    renderChangedEndpoints();
+    renderModelBrowser();
+    renderSelected();
+    updateGraph();
+}
+
+function selectedGraphNodeData() {
+    const selected = selectedGraphNodesInOrder();
+    return selected.length ? selected[selected.length - 1].data() : null;
+}
+
+function selectedGraphNodesInOrder() {
+    const selected = state.cy?.nodes(":selected").toArray() || [];
+    const order = id => state.graphSelectionOrder.indexOf(id);
+    return selected.sort((a, b) => order(a.id()) - order(b.id()));
+}
+
+function openSelectedModelDetails() {
+    const models = selectedGraphNodesInOrder().map(node => node.data()).filter(isSchemaNode);
+    if (models.length === 0) {
+        setStatus("Select one or two model nodes first");
+        return;
+    }
+
+    if (models.length > 2) {
+        setStatus("Comparing the last two selected models");
+    }
+
+    openSchemaExplorerPanes(models.slice(-2));
+}
+
+function setShortcutsOpen(open) {
+    if (!els.shortcutsPanel) {
+        return;
+    }
+
+    els.shortcutsPanel.classList.toggle("hidden", !open);
+    els.shortcutsButton?.setAttribute("aria-expanded", String(open));
 }
 
 function isEditableTarget(target) {
@@ -778,9 +898,110 @@ async function loadDiffSources() {
     }
 
     els.repoPanel.hidden = false;
-    els.diffSourceSelect.addEventListener("change", renderRepoSourceCapabilities);
+    els.diffSourceSelect.addEventListener("change", () => {
+        renderRepoSourceCapabilities();
+        loadWorktreesForSelectedSource();
+    });
     renderRepoSourceCapabilities();
+    await loadWorktreesForSelectedSource();
     refreshIcons();
+}
+
+async function loadWorktreesForSelectedSource() {
+    if (!els.worktreeSelect) {
+        return;
+    }
+
+    const source = els.diffSourceSelect?.value;
+    els.worktreeSelect.innerHTML = "";
+    if (!source) {
+        els.worktreeLoadButton?.toggleAttribute("disabled", true);
+        return;
+    }
+
+    let worktrees = [];
+    try {
+        const response = await fetch(`/api/diff/sources/${encodeURIComponent(source)}/worktrees`);
+        worktrees = response.ok ? await response.json() : [];
+    } catch (error) {
+        console.error(error);
+    }
+
+    for (const worktree of worktrees) {
+        const option = document.createElement("option");
+        option.value = worktree.path;
+        const name = worktree.path.split(/[\\/]/).filter(Boolean).pop() || worktree.path;
+        const suffix = worktree.locked ? " [locked]" : "";
+        option.textContent = worktree.branch ? `${name} (${worktree.branch})${suffix}` : `${name}${suffix}`;
+        els.worktreeSelect.appendChild(option);
+    }
+
+    els.worktreeLoadButton?.toggleAttribute("disabled", worktrees.length === 0);
+    refreshIcons();
+}
+
+async function loadWorktreeSpec() {
+    const worktreePath = els.worktreeSelect?.value;
+    if (!worktreePath) {
+        setRepoStatus("No worktrees found for this source.", true);
+        return;
+    }
+
+    const label = els.worktreeSelect.selectedOptions?.[0]?.textContent || worktreePath;
+    setRepoBusy(true);
+    setRepoStatus(`Loading ${label} - bundling if it hasn't been built yet, this can take a while.`, false);
+    setStatus(`Loading ${label}`);
+
+    try {
+        const response = await fetch("/api/specs/load-worktree", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ source: els.diffSourceSelect?.value, worktreePath })
+        });
+
+        const payload = await response.json().catch(() => null);
+        if (!response.ok) {
+            throw new Error(payload?.error || `Request failed with status ${response.status}`);
+        }
+
+        await applyLoadedWorktree(payload, label);
+        setRepoStatus(payload.fromPrebuilt ? `Loaded ${label} (already bundled).` : `Bundled and loaded ${label}.`, false);
+        setStatus("Ready");
+    } catch (error) {
+        console.error(error);
+        setRepoStatus(error.message || "Failed to load the worktree.", true);
+        setStatus("Load failed");
+    } finally {
+        setRepoBusy(false);
+    }
+}
+
+async function applyLoadedWorktree(payload, label) {
+    state.specId = payload.summary.specId;
+    state.compareSpecId = null;
+    state.changedEndpoints = [];
+    state.changedModels = [];
+    state.affectedModels = [];
+    state.modelTab = "all";
+    state.selected.clear();
+    state.currentDetailsNode = null;
+    state.schemaCache.clear();
+    state.schemaExplorerLoadErrors.clear();
+    closeSchemaExplorer();
+    renderDiffControls();
+    renderProvenance(null);
+    renderSpecMeta(payload.summary);
+    if (els.fileLabel) {
+        els.fileLabel.textContent = label;
+    }
+
+    await loadAllEndpoints();
+    await loadEndpoints();
+    await loadModels();
+    renderChangedEndpoints();
+    renderModelBrowser();
+    renderSelected();
+    updateGraph();
 }
 
 function renderRepoSourceCapabilities() {
@@ -843,7 +1064,7 @@ async function requestRepoDiff(url, body, busyLabel) {
 
         await applyPreparedDiff(payload);
         setRepoStatus("", false);
-        setStatus("Diff ready");
+        setStatus(diffHasNoChanges(payload) ? "No API changes - showing target branch" : "Diff ready");
     } catch (error) {
         console.error(error);
         setRepoStatus(error.message || "Failed to prepare the diff.", true);
@@ -851,6 +1072,10 @@ async function requestRepoDiff(url, body, busyLabel) {
     } finally {
         setRepoBusy(false);
     }
+}
+
+function diffHasNoChanges(diff) {
+    return !(diff?.changedEndpoints?.length || diff?.changedSchemas?.length || diff?.affectedSchemas?.length);
 }
 
 async function applyPreparedDiff(diff) {
@@ -868,6 +1093,22 @@ async function applyPreparedDiff(diff) {
     state.collapsedSections.delete("affected");
     state.collapsedSections.delete("models");
     closeSchemaExplorer();
+
+    // With no API changes, "show only changed" would leave an empty graph; turn it off so the
+    // target branch's models can be browsed normally.
+    const hasChanges = state.changedEndpoints.length > 0 ||
+        state.changedModels.length > 0 ||
+        state.affectedModels.length > 0;
+    if (els.showOnlyChangedInput) {
+        if (!hasChanges && els.showOnlyChangedInput.checked) {
+            els.showOnlyChangedInput.checked = false;
+            state.showOnlyChangedAutoCleared = true;
+        } else if (hasChanges && state.showOnlyChangedAutoCleared) {
+            els.showOnlyChangedInput.checked = true;
+            state.showOnlyChangedAutoCleared = false;
+        }
+    }
+    state.modelTab = "all";
 
     renderSectionCollapse();
     renderDiffControls();
@@ -889,6 +1130,7 @@ async function applyPreparedDiff(diff) {
 function setRepoBusy(busy) {
     els.prLoadButton?.toggleAttribute("disabled", busy);
     els.refLoadButton?.toggleAttribute("disabled", busy);
+    els.worktreeLoadButton?.toggleAttribute("disabled", busy || !els.worktreeSelect?.options.length);
     els.repoPanel?.classList.toggle("busy", busy);
     if (!busy) {
         renderRepoSourceCapabilities();
@@ -942,6 +1184,9 @@ function renderProvenance(provenance) {
             ? "partly cached"
             : "freshly built";
     rows.push(`<div class="provenance-meta">${escapeHtml(provenance.baseStrategy)} &middot; ${cached} in ${provenance.prepareSeconds}s</div>`);
+    if (provenance.specsIdentical) {
+        rows.push(`<div class="provenance-meta">No API changes &middot; browsing ${escapeHtml(provenance.baseLabel)}</div>`);
+    }
 
     els.diffProvenance.innerHTML = rows.join("");
     els.diffProvenance.classList.remove("hidden");
@@ -1593,9 +1838,26 @@ function initializeGraph() {
     els.graph.appendChild(els.graphNodeActions);
 
     state.cy.on("tap", "node", event => {
-        state.cy.nodes().unselect();
-        event.target.select();
+        // With Ctrl/Shift/Cmd held, Cytoscape toggles the tapped node itself right after this handler,
+        // which is what builds up a multi-selection; only a plain click resets the selection here.
+        const original = event.originalEvent;
+        if (!(original?.ctrlKey || original?.metaKey || original?.shiftKey)) {
+            state.cy.nodes().unselect();
+            event.target.select();
+        }
         renderDetails(event.target.data());
+    });
+    state.cy.on("select", "node", event => {
+        const id = event.target.id();
+        state.graphSelectionOrder = state.graphSelectionOrder.filter(item => item !== id).concat(id);
+    });
+    state.cy.on("unselect", "node", event => {
+        const id = event.target.id();
+        state.graphSelectionOrder = state.graphSelectionOrder.filter(item => item !== id);
+    });
+    state.cy.on("remove", "node", event => {
+        const id = event.target.id();
+        state.graphSelectionOrder = state.graphSelectionOrder.filter(item => item !== id);
     });
     state.cy.on("tap", "edge", event => renderEdgeDetails(event.target.data()));
     state.cy.on("pan zoom resize position render", updateGraphNodeActionPositions);
@@ -2333,6 +2595,167 @@ function renderDetails(data) {
     els.detailsBadge.className = diffClass(data.diffState);
     els.detailsBody.innerHTML = renderNodeSummary(data, false) + renderSchemaExplorerAction(data);
     refreshIcons();
+
+    if (data.kind === "endpoint") {
+        loadEndpointDetails(data);
+    }
+}
+
+async function loadEndpointDetails(data) {
+    els.detailsBody.innerHTML = renderDiffEntries(data) + `<div class="detail-block"><div class="detail-value">Loading endpoint details…</div></div>`;
+
+    const params = new URLSearchParams({ endpointId: data.id });
+    if (state.compareSpecId) {
+        params.set("compareSpecId", state.compareSpecId);
+    }
+
+    let details = null;
+    try {
+        const response = await fetch(`/api/specs/${state.specId}/endpoints/details?${params}`);
+        details = response.ok ? await response.json() : null;
+    } catch {
+        details = null;
+    }
+
+    // The user may have clicked something else while the request was in flight.
+    if (state.currentDetailsNode !== data) {
+        return;
+    }
+
+    els.detailsBody.innerHTML = details
+        ? renderDiffEntries(data) + renderEndpointDetails(details)
+        : renderNodeSummary(data, false);
+    refreshIcons();
+}
+
+function renderEndpointDetails(details) {
+    let html = `
+        <div class="detail-block">
+            <div class="endpoint-detail-heading">
+                <span class="method-badge ${escapeHtml(details.method)}">${escapeHtml(details.method)}</span>
+                <span class="endpoint-detail-path">${escapeHtml(details.path)}</span>
+            </div>
+            ${details.deprecated ? `<span class="endpoint-deprecated">Deprecated</span>` : ""}
+        </div>
+    `;
+
+    if (details.summary) {
+        html += detailBlock("Summary", `<div class="detail-value">${escapeHtml(details.summary)}</div>`);
+    }
+
+    if (details.operationId) {
+        html += detailBlock("Operation ID", `<div class="detail-value"><code class="endpoint-operation-id">${escapeHtml(details.operationId)}</code></div>`);
+    }
+
+    if (details.permissions?.length) {
+        html += detailBlock("Permissions", `<div class="tag-row">${details.permissions.map(claim => `<span class="tag endpoint-permission"><code>${escapeHtml(claim)}</code></span>`).join("")}</div>`);
+    }
+
+    if (details.description && details.description !== details.summary) {
+        html += collapsibleDetailBlock("Description", `<div class="detail-value endpoint-description">${escapeHtml(details.description)}</div>`);
+    }
+
+    if (details.tags?.length) {
+        html += detailBlock("Tags", `<div class="tag-row">${details.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join("")}</div>`);
+    }
+
+    const locationOrder = ["path", "query", "header", "cookie"];
+    const locations = [...new Set((details.parameters || []).map(parameter => parameter.in))]
+        .sort((a, b) => (locationOrder.indexOf(a) + 1 || 99) - (locationOrder.indexOf(b) + 1 || 99));
+    for (const location of locations) {
+        const parameters = details.parameters.filter(parameter => parameter.in === location);
+        html += detailBlock(
+            `${location} parameters (${parameters.length})`,
+            `<div class="property-list">${parameters.map(renderEndpointParameterRow).join("")}</div>`);
+    }
+
+    if (details.requestBody) {
+        const body = details.requestBody;
+        html += detailBlock(
+            `Request body${body.required ? " (required)" : ""}`,
+            `${body.description ? `<div class="detail-value endpoint-description">${escapeHtml(body.description)}</div>` : ""}
+             ${renderEndpointMediaTypes(body.content)}`);
+    }
+
+    if (details.responses?.length) {
+        html += collapsibleDetailBlock(
+            `Responses (${details.responses.length})`,
+            `<div class="endpoint-response-list">${details.responses.map(response => `
+                <div class="endpoint-response">
+                    <div class="endpoint-response-head">
+                        <span class="endpoint-status ${responseStatusClass(response.status)}">${escapeHtml(response.status)}</span>
+                        <span class="detail-value">${escapeHtml(response.description || "")}</span>
+                    </div>
+                    ${renderEndpointMediaTypes(response.content)}
+                </div>
+            `).join("")}</div>`);
+    }
+
+    return `<div class="endpoint-details">${html}</div>`;
+}
+
+function detailBlock(label, content) {
+    return `
+        <div class="detail-block">
+            <div class="detail-label">${escapeHtml(label)}</div>
+            ${content}
+        </div>
+    `;
+}
+
+// Native <details> keeps long sections collapsed by default without extra JS state.
+function collapsibleDetailBlock(label, content) {
+    return `
+        <details class="detail-block detail-collapsible">
+            <summary class="detail-label">${escapeHtml(label)}</summary>
+            ${content}
+        </details>
+    `;
+}
+
+function renderEndpointParameterRow(parameter) {
+    const type = [parameter.type, parameter.format && parameter.type !== parameter.format ? parameter.format : null]
+        .filter(Boolean)
+        .join(":");
+    const typeHtml = parameter.schemaRefId
+        ? `<button type="button" class="property-type schema-ref-chip" data-open-schema-id="${escapeHtml(parameter.schemaRefId)}" title="Open ${escapeHtml(stripSchemaPrefix(parameter.schemaRefId))}">${escapeHtml(type)}</button>`
+        : `<span class="property-type">${escapeHtml(type || "any")}</span>`;
+    const meta = [
+        parameter.default != null ? `default: ${parameter.default}` : null,
+        parameter.example != null ? `example: ${parameter.example}` : null
+    ].filter(Boolean);
+
+    return `
+        <div class="property-row endpoint-parameter-row ${parameter.deprecated ? "deprecated" : ""}">
+            <div class="property-main">
+                <span class="property-name">${parameter.required ? `<span class="required-dot">*</span> ` : ""}${escapeHtml(parameter.name)}</span>
+                ${parameter.description ? `<div class="endpoint-parameter-description">${escapeHtml(parameter.description)}</div>` : ""}
+                ${meta.length ? `<div class="endpoint-parameter-meta">${meta.map(escapeHtml).join(" · ")}</div>` : ""}
+                ${parameter.enumValues?.length ? `<div class="enum-chip-row property-enums">${renderEnumChips(parameter.enumValues)}</div>` : ""}
+            </div>
+            ${typeHtml}
+        </div>
+    `;
+}
+
+function renderEndpointMediaTypes(content) {
+    if (!content?.length) {
+        return "";
+    }
+
+    return `<div class="endpoint-media-list">${content.map(media => `
+        <div class="endpoint-media">
+            <span class="endpoint-media-type">${escapeHtml(media.mediaType)}</span>
+            ${media.schemaRefId
+                ? `<button type="button" class="tag child-model-chip" data-open-schema-id="${escapeHtml(media.schemaRefId)}" title="Open ${escapeHtml(stripSchemaPrefix(media.schemaRefId))}">${escapeHtml(media.type || stripSchemaPrefix(media.schemaRefId))}</button>`
+                : media.type ? `<span class="tag">${escapeHtml(media.type)}</span>` : ""}
+        </div>
+    `).join("")}</div>`;
+}
+
+function responseStatusClass(status) {
+    const first = String(status).charAt(0);
+    return first === "2" ? "status-success" : first === "4" || first === "5" ? "status-error" : "status-other";
 }
 
 function renderEdgeDetails(data) {
@@ -2625,31 +3048,95 @@ function diffClass(stateName) {
 }
 
 async function openSchemaExplorer(data) {
-    if (!state.specId || !isSchemaNode(data)) {
+    return openSchemaExplorerPanes([data]);
+}
+
+async function openSchemaExplorerPanes(items) {
+    const schemas = (items || []).filter(isSchemaNode).slice(0, 2);
+    if (!state.specId || schemas.length === 0) {
         return;
     }
 
-    const rootId = data.id;
-    state.schemaExplorerRootId = rootId;
+    state.schemaExplorerRootIds = schemas.map(schema => schema.id);
     state.schemaExplorerExpanded.clear();
     state.schemaExplorerRows.clear();
-    state.schemaCache.set(rootId, normalizeSchema(data));
+    schemas.forEach(schema => {
+        if (!state.schemaCache.get(schema.id)?.fullyLoaded) {
+            state.schemaCache.set(schema.id, normalizeSchema(schema));
+        }
+    });
     els.schemaExplorerOverlay?.classList.remove("hidden");
     document.body.classList.add("schema-explorer-open");
     renderSchemaExplorer();
+    await loadSchemaExplorerRoots(state.schemaExplorerRootIds);
+}
 
-    try {
-        await loadSchema(rootId);
-        renderSchemaExplorer();
-    } catch (error) {
-        console.error(error);
+async function loadSchemaExplorerRoots(rootIds) {
+    await Promise.all(rootIds.map(async rootId => {
+        try {
+            await loadSchema(rootId);
+        } catch (error) {
+            console.error(error);
+            state.schemaExplorerLoadErrors.add(rootId);
+        }
+    }));
+    renderSchemaExplorer();
+}
+
+async function replaceSchemaExplorerPane(paneIndex, schemaId) {
+    if (!schemaId) {
+        return;
     }
+
+    if (!state.schemaCache.has(schemaId)) {
+        state.schemaCache.set(schemaId, normalizeSchema({ id: schemaId, kind: "schema", label: stripSchemaPrefix(schemaId) }));
+    }
+    state.schemaExplorerRootIds[paneIndex] = schemaId;
+    clearSchemaExplorerPaneExpansion(paneIndex);
+    renderSchemaExplorer();
+    await loadSchemaExplorerRoots([schemaId]);
+}
+
+function swapSchemaExplorerPanes() {
+    if (state.schemaExplorerRootIds.length !== 2) {
+        return;
+    }
+
+    // Expansion keys carry the pane index, so they swap along with the models.
+    const expanded = [...state.schemaExplorerExpanded].map(key =>
+        key.replace(/^p([01])/, (_, pane) => `p${pane === "0" ? 1 : 0}`));
+    state.schemaExplorerRootIds.reverse();
+    state.schemaExplorerExpanded = new Set(expanded);
+    renderSchemaExplorer();
+}
+
+function closeSchemaExplorerPane(paneIndex) {
+    if (state.schemaExplorerRootIds.length < 2) {
+        closeSchemaExplorer();
+        return;
+    }
+
+    if (paneIndex === 0) {
+        swapSchemaExplorerPanes();
+    }
+    state.schemaExplorerRootIds = state.schemaExplorerRootIds.slice(0, 1);
+    clearSchemaExplorerPaneExpansion(1);
+    renderSchemaExplorer();
+}
+
+function clearSchemaExplorerPaneExpansion(paneIndex) {
+    const prefix = `p${paneIndex}`;
+    state.schemaExplorerExpanded.forEach(key => {
+        if (key === prefix || key.startsWith(`${prefix}.`)) {
+            state.schemaExplorerExpanded.delete(key);
+        }
+    });
 }
 
 function closeSchemaExplorer() {
     els.schemaExplorerOverlay?.classList.add("hidden");
     document.body.classList.remove("schema-explorer-open");
-    state.schemaExplorerRootId = null;
+    state.schemaExplorerRootIds = [];
     state.schemaExplorerExpanded.clear();
     state.schemaExplorerRows.clear();
     state.schemaExplorerLoadErrors.clear();
@@ -2802,18 +3289,67 @@ async function openSimilarSchema(schemaId) {
 
 function renderSchemaExplorer() {
     state.schemaExplorerRows.clear();
-    const root = state.schemaCache.get(state.schemaExplorerRootId);
-    if (!root) {
-        els.schemaExplorerTitle.textContent = "Model details";
-        els.schemaExplorerBadge.textContent = "";
-        els.schemaExplorerBody.innerHTML = `<div class="schema-tree-message">Loading schema</div>`;
+    const rootIds = state.schemaExplorerRootIds;
+    const split = rootIds.length === 2;
+    els.schemaExplorerOverlay?.classList.toggle("split", split);
+
+    if (!split) {
+        const root = state.schemaCache.get(rootIds[0]);
+        if (!root) {
+            els.schemaExplorerTitle.textContent = "Model details";
+            els.schemaExplorerBadge.textContent = "";
+            els.schemaExplorerBody.innerHTML = `<div class="schema-tree-message">Loading schema</div>`;
+            return;
+        }
+
+        els.schemaExplorerTitle.textContent = root.label;
+        els.schemaExplorerBadge.textContent = root.subtitle || root.kind;
+        els.schemaExplorerBody.innerHTML = `<div data-schema-pane="0">${renderSchemaExplorerPaneTree(root, 0)}</div>`;
+        refreshIcons();
         return;
     }
 
-    els.schemaExplorerTitle.textContent = root.label;
-    els.schemaExplorerBadge.textContent = root.subtitle || root.kind;
-    els.schemaExplorerBody.innerHTML = renderSchemaTreeNode(root, "root", [root.id], 0);
+    const roots = rootIds.map(id => state.schemaCache.get(id));
+    els.schemaExplorerTitle.textContent = "Compare models";
+    els.schemaExplorerBadge.textContent = roots.map((root, index) => root?.label || stripSchemaPrefix(rootIds[index])).join("  vs  ");
+    els.schemaExplorerBody.innerHTML = `
+        <div class="schema-explorer-split">
+            ${roots.map((root, index) => renderSchemaExplorerPane(root, rootIds[index], index)).join("")}
+        </div>
+    `;
     refreshIcons();
+}
+
+function renderSchemaExplorerPane(root, rootId, paneIndex) {
+    const label = root?.label || stripSchemaPrefix(rootId);
+    return `
+        <section class="schema-explorer-pane" data-schema-pane="${paneIndex}">
+            <div class="schema-explorer-pane-header">
+                <div class="schema-explorer-pane-title">
+                    <span class="schema-explorer-pane-name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+                    <span class="schema-explorer-pane-meta">${escapeHtml(root?.subtitle || "")}</span>
+                </div>
+                <button class="icon-button" type="button" data-schema-pane-swap title="Swap sides" aria-label="Swap sides">
+                    <i data-lucide="arrow-left-right"></i>
+                </button>
+                <button class="icon-button" type="button" data-schema-pane-close="${paneIndex}" title="Close this side" aria-label="Close this side">
+                    <i data-lucide="x"></i>
+                </button>
+            </div>
+            <div class="schema-explorer-pane-body">
+                ${root ? renderSchemaExplorerPaneTree(root, paneIndex) : `<div class="schema-tree-message">Loading schema</div>`}
+            </div>
+        </section>
+    `;
+}
+
+function renderSchemaExplorerPaneTree(root, paneIndex) {
+    const error = state.schemaExplorerLoadErrors.has(root.id) && !root.fullyLoaded
+        ? `<div class="schema-tree-loading error">Could not load all of ${escapeHtml(root.label)}</div>`
+        : "";
+
+    // The pane prefix keeps expand/collapse state separate when both panes show the same model.
+    return error + renderSchemaTreeNode(root, `p${paneIndex}`, [root.id], 0);
 }
 
 function renderSchemaTreeNode(schema, pathKey, trail, depth) {
@@ -2846,11 +3382,106 @@ function renderSchemaTreeNode(schema, pathKey, trail, depth) {
                 </button>
             </div>
             ${renderDiffEntries(schema)}
-            ${renderChildModels(schema.children)}
             ${enumHtml}
             ${propertiesHtml}
+            ${renderSchemaTreeDerivedModels(schema.children, pathKey, trail, depth)}
         </div>
     `;
+}
+
+// Derived models are listed inline as collapsible rows, so a polymorphic parent can be read in one
+// place instead of jumping between models. The "c" segment keeps their keys apart from properties.
+function renderSchemaTreeDerivedModels(children, pathKey, trail, depth) {
+    if (!children?.length) {
+        return "";
+    }
+
+    const keys = children.map((_, index) => `${pathKey}.c${index}`);
+    const allExpanded = keys.every(key => state.schemaExplorerExpanded.has(key));
+    return `
+        <div class="schema-tree-derived">
+            <div class="schema-tree-derived-header">
+                <span class="detail-label">Derived models (${children.length})</span>
+                ${children.length > 1 ? `
+                    <button class="schema-tree-derived-toggle-all" type="button" data-schema-derived-all="${escapeHtml(pathKey)}" data-schema-derived-count="${children.length}" data-schema-derived-expand="${!allExpanded}">
+                        ${allExpanded ? "Collapse all" : "Expand all"}
+                    </button>
+                ` : ""}
+            </div>
+            <div class="schema-tree-properties">
+                ${children.map((child, index) => renderSchemaTreeDerivedModel(child, keys[index], trail, depth)).join("")}
+            </div>
+        </div>
+    `;
+}
+
+function renderSchemaTreeDerivedModel(child, pathKey, trail, depth) {
+    const isCycle = trail.includes(child.id);
+    const atMaxDepth = depth >= schemaExplorerMaxDepth;
+    const canExpand = !isCycle && !atMaxDepth;
+    const expanded = canExpand && state.schemaExplorerExpanded.has(pathKey);
+    const schema = expanded ? state.schemaCache.get(child.id) : null;
+
+    if (canExpand) {
+        state.schemaExplorerRows.set(pathKey, { refId: child.id });
+    }
+
+    const toggle = canExpand
+        ? `
+            <button class="schema-tree-toggle" type="button" data-schema-toggle="${escapeHtml(pathKey)}" aria-expanded="${expanded}" title="${expanded ? "Collapse model" : "Expand model"}" aria-label="${expanded ? "Collapse model" : "Expand model"}">
+                <i data-lucide="${expanded ? "chevron-down" : "chevron-right"}"></i>
+            </button>
+        `
+        : `<span class="schema-tree-toggle-placeholder"></span>`;
+    const extra = isCycle
+        ? `<span class="schema-tree-note">cycle</span>`
+        : atMaxDepth ? `<span class="schema-tree-note">depth limit</span>` : "";
+    const childHtml = expanded
+        ? state.schemaExplorerLoadErrors.has(child.id)
+            ? `<div class="schema-tree-loading error">Could not load ${escapeHtml(child.name)}</div>`
+            : schema?.fullyLoaded
+                ? renderSchemaTreeNode(schema, pathKey, [...trail, child.id], depth + 1)
+                : `<div class="schema-tree-loading">Loading ${escapeHtml(child.name)}</div>`
+        : "";
+
+    return `
+        <div class="schema-tree-property schema-tree-derived-model">
+            <div class="schema-tree-property-row">
+                ${toggle}
+                <span class="schema-tree-origin-badge derived" title="Derived model"><i data-lucide="git-branch"></i></span>
+                <div class="schema-tree-property-main">
+                    <span class="schema-tree-property-name">${escapeHtml(child.name)}</span>
+                </div>
+                ${extra}
+                <button type="button" class="property-type schema-ref-chip" data-open-schema-id="${escapeHtml(child.id)}" title="Open ${escapeHtml(child.name)} on its own">open</button>
+                <span></span>
+            </div>
+            ${childHtml}
+        </div>
+    `;
+}
+
+async function setSchemaExplorerDerivedExpanded(pathKey, count, expand) {
+    const keys = Array.from({ length: count }, (_, index) => `${pathKey}.c${index}`);
+    if (!expand) {
+        keys.forEach(key => state.schemaExplorerExpanded.delete(key));
+        renderSchemaExplorer();
+        return;
+    }
+
+    // Rendering first registers the rows, which is where each key's model id comes from.
+    keys.forEach(key => state.schemaExplorerExpanded.add(key));
+    renderSchemaExplorer();
+    const refIds = keys.map(key => state.schemaExplorerRows.get(key)?.refId).filter(Boolean);
+    await Promise.all(refIds.map(async refId => {
+        try {
+            await loadSchema(refId);
+        } catch (error) {
+            console.error(error);
+            state.schemaExplorerLoadErrors.add(refId);
+        }
+    }));
+    renderSchemaExplorer();
 }
 
 function renderSchemaTreeValueRow(value) {

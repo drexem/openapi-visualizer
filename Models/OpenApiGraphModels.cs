@@ -186,3 +186,56 @@ public sealed class DiffCounts
     public required int AddedEdges { get; init; }
     public required int DeletedEdges { get; init; }
 }
+
+public sealed class EndpointDetails
+{
+    public required string Id { get; init; }
+    public required string Method { get; init; }
+    public required string Path { get; init; }
+    public string? Summary { get; init; }
+    public string? Description { get; init; }
+    public string? OperationId { get; init; }
+    public bool Deprecated { get; init; }
+    public IReadOnlyList<string> Tags { get; init; } = [];
+    public IReadOnlyList<EndpointParameterInfo> Parameters { get; init; } = [];
+    public EndpointRequestBodyInfo? RequestBody { get; init; }
+    public IReadOnlyList<EndpointResponseInfo> Responses { get; init; } = [];
+    public IReadOnlyList<string> Security { get; init; } = [];
+    public IReadOnlyList<string> Permissions { get; init; } = [];
+}
+
+public sealed class EndpointParameterInfo
+{
+    public required string Name { get; init; }
+    public required string In { get; init; }
+    public bool Required { get; init; }
+    public bool Deprecated { get; init; }
+    public string? Description { get; init; }
+    public string? Type { get; init; }
+    public string? Format { get; init; }
+    public string? SchemaRefId { get; init; }
+    public string? Default { get; init; }
+    public string? Example { get; init; }
+    public IReadOnlyList<string> EnumValues { get; init; } = [];
+}
+
+public sealed class EndpointRequestBodyInfo
+{
+    public bool Required { get; init; }
+    public string? Description { get; init; }
+    public IReadOnlyList<EndpointMediaTypeInfo> Content { get; init; } = [];
+}
+
+public sealed class EndpointResponseInfo
+{
+    public required string Status { get; init; }
+    public string? Description { get; init; }
+    public IReadOnlyList<EndpointMediaTypeInfo> Content { get; init; } = [];
+}
+
+public sealed class EndpointMediaTypeInfo
+{
+    public required string MediaType { get; init; }
+    public string? Type { get; init; }
+    public string? SchemaRefId { get; init; }
+}

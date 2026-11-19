@@ -1,5 +1,7 @@
 using System.Diagnostics;
 using System.Formats.Tar;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.Extensions.Options;
 using OpenApiVisualizer.Models;
 
@@ -174,6 +176,130 @@ public sealed class SpecBundler
         }
     }
 
+    /// <summary>
+    /// Lists the git worktrees attached to <paramref name="source"/>'s repository, so the caller
+    /// can offer them as live spec sources without any static configuration.
+    /// </summary>
+    public async Task<IReadOnlyList<WorktreeInfo>> ListWorktreesAsync(SpecSourceOptions source, CancellationToken cancellationToken)
+    {
+        var result = await GitAsync(source, ["worktree", "list", "--porcelain"], cancellationToken);
+        if (!result.Succeeded)
+        {
+            throw new SpecBuildException($"git worktree list failed for {source.RepoPath}. {result.Tail(4)}");
+        }
+
+        return ParseWorktreeList(result.StdOut);
+    }
+
+    private static IReadOnlyList<WorktreeInfo> ParseWorktreeList(string porcelain)
+    {
+        var worktrees = new List<WorktreeInfo>();
+        string? path = null;
+        string? branch = null;
+        var locked = false;
+
+        void Flush()
+        {
+            if (path is not null)
+            {
+                worktrees.Add(new WorktreeInfo(path, branch, locked));
+            }
+            path = null;
+            branch = null;
+            locked = false;
+        }
+
+        foreach (var rawLine in porcelain.Split('\n'))
+        {
+            var line = rawLine.TrimEnd('\r');
+            if (line.Length == 0)
+            {
+                Flush();
+                continue;
+            }
+
+            if (line.StartsWith("worktree ", StringComparison.Ordinal))
+            {
+                path = line["worktree ".Length..];
+            }
+            else if (line.StartsWith("branch ", StringComparison.Ordinal))
+            {
+                var reference = line["branch ".Length..];
+                branch = reference.StartsWith("refs/heads/", StringComparison.Ordinal)
+                    ? reference["refs/heads/".Length..]
+                    : reference;
+            }
+            else if (line.StartsWith("locked", StringComparison.Ordinal))
+            {
+                locked = true;
+            }
+        }
+
+        Flush();
+        return worktrees;
+    }
+
+    /// <summary>
+    /// Produces a spec straight from a worktree's current files - uncommitted changes included -
+    /// instead of a specific commit. Prefers a file the worktree's own build already produced
+    /// (<see cref="SpecSourceOptions.PrebuiltFile"/>); only runs <see cref="SpecSourceOptions.Steps"/>
+    /// when nothing is there yet. Unlike <see cref="GetSpecAsync"/> this is never cached by content,
+    /// since a worktree is mutable - every call reflects the files on disk right now.
+    /// </summary>
+    public async Task<(string Path, bool FromPrebuilt)> GetWorktreeSpecAsync(
+        SpecSourceOptions source,
+        string worktreePath,
+        CancellationToken cancellationToken)
+    {
+        var normalizedWorktree = Path.GetFullPath(worktreePath);
+        if (!Directory.Exists(normalizedWorktree))
+        {
+            throw new SpecBuildException($"Worktree path does not exist: {normalizedWorktree}");
+        }
+
+        if (!string.IsNullOrWhiteSpace(source.PrebuiltFile))
+        {
+            var prebuiltPath = Substitute(source.PrebuiltFile, normalizedWorktree, normalizedWorktree, string.Empty, normalizedWorktree)
+                .Replace('/', Path.DirectorySeparatorChar);
+            if (File.Exists(prebuiltPath) && new FileInfo(prebuiltPath).Length > 0)
+            {
+                return (prebuiltPath, true);
+            }
+        }
+
+        if (source.Steps.Count == 0)
+        {
+            throw new SpecBuildException(
+                $"'{source.Name}' has no prebuilt spec at {normalizedWorktree} and no build steps configured to produce one.");
+        }
+
+        await _buildGate.WaitAsync(cancellationToken);
+        try
+        {
+            var key = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(normalizedWorktree)))[..12].ToLowerInvariant();
+            var workDir = Path.Combine(_cacheRoot, "wt", key);
+            var outputPath = Path.Combine(workDir, "spec.json");
+
+            DeleteDirectory(workDir);
+            Directory.CreateDirectory(workDir);
+
+            await RunStepsAsync(source, normalizedWorktree, workDir, outputPath, cancellationToken);
+
+            if (!File.Exists(outputPath) || new FileInfo(outputPath).Length == 0)
+            {
+                throw new SpecBuildException(
+                    $"'{source.Name}' ran its build steps against {normalizedWorktree} but produced no output.");
+            }
+
+            _logger.LogInformation("Built worktree spec for {Source} at {Worktree}", source.Name, normalizedWorktree);
+            return (outputPath, false);
+        }
+        finally
+        {
+            _buildGate.Release();
+        }
+    }
+
     private async Task ExtractAsync(
         SpecSourceOptions source,
         string commit,
@@ -269,3 +395,5 @@ public sealed class SpecBundler
         }
     }
 }
+
+public sealed record WorktreeInfo(string Path, string? Branch, bool Locked);
